@@ -89,6 +89,11 @@ export default function DashboardClient() {
   const shadowPnl = (data?.shadowPositions ?? []).reduce((total, position) => total + asNumber(position.pnl), 0);
   const court = (latest?.raw?.court as Array<{ agent: string; vote: string; rationale: string }> | undefined) ?? [];
   const evidenceHash = typeof latest?.raw?.evidence_hash === "string" ? latest.raw.evidence_hash : null;
+  const allocation = latest?.raw?.allocation as {
+    status?: string; reason?: string; structure?: string; short_leg?: string; max_loss?: number; max_reward?: number;
+    reward_risk?: number; expected_value?: number; payoff_probability?: number; kelly_fraction?: number; risk_budget?: number; quantity?: number;
+  } | undefined;
+  const allocationReady = allocation?.status === "ranked";
 
   return <main className="app-shell">
     <header className="topbar">
@@ -133,6 +138,18 @@ export default function DashboardClient() {
           <button className="hard-kill" type="button" disabled={!data || saving} onClick={() => void hardKill()}><ShieldAlert size={16} />Hard kill and cancel orders</button>
           <p className="control-note"><Clock3 size={15} />Scheduled scan runs every five minutes on weekdays.</p>
         </section>
+      </section>
+
+      <section className="panel allocation-panel">
+        <div className="panel-heading"><div><p className="eyebrow">PAYOFF ENGINE / CAPITAL ALLOCATOR</p><h2>Expected-value ranked execution</h2></div><span className={`score-chip ${allocationReady ? "" : "allocation-waiting"}`}>{allocationReady ? allocation.structure?.toUpperCase() : "NO QUALIFYING PAYOFF"}</span></div>
+        {allocationReady ? <><div className="allocation-grid">
+          <div><span>Maximum loss</span><strong>{money.format(asNumber(allocation.max_loss) * asNumber(allocation.quantity))}</strong><small>{number.format(asNumber(allocation.quantity))} spread{asNumber(allocation.quantity) === 1 ? "" : "s"} allocated</small></div>
+          <div><span>Maximum reward</span><strong>{money.format(asNumber(allocation.max_reward) * asNumber(allocation.quantity))}</strong><small>Defined at entry</small></div>
+          <div><span>Reward / risk</span><strong>{asNumber(allocation.reward_risk).toFixed(2)}x</strong><small>Payoff geometry</small></div>
+          <div><span>Expected value</span><strong>{money.format(asNumber(allocation.expected_value) * asNumber(allocation.quantity))}</strong><small>Model-weighted estimate</small></div>
+          <div><span>Payoff probability</span><strong>{(asNumber(allocation.payoff_probability) * 100).toFixed(0)}%</strong><small>Conservative model proxy</small></div>
+          <div><span>Fractional Kelly</span><strong>{(asNumber(allocation.kelly_fraction) * 100).toFixed(1)}%</strong><small>{money.format(asNumber(allocation.risk_budget))} loss ceiling</small></div>
+        </div><p className="allocation-note">Long {latest?.option_symbol} / short {allocation.short_leg}. The allocator ranks executable debit spreads by payoff, liquidity, volatility edge, and capped risk before the Court can approve execution.</p></> : <p className="allocation-note muted">{allocation?.reason ?? "The payoff engine will publish an allocation after the next executable surface scan."}</p>}
       </section>
 
       <section className="research-grid">

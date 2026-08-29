@@ -80,7 +80,7 @@ export function riskGates(candidate: Candidate, marketOpen: boolean, maxPremium:
   const quoteAge = candidate.quoteTimestamp ? Date.now() - new Date(candidate.quoteTimestamp).getTime() : Number.POSITIVE_INFINITY;
   return [
     { name: "Market session", passed: marketOpen, detail: marketOpen ? "Alpaca reports market open" : "Market is closed" },
-    { name: "Defined risk", passed: candidate.contractType === "call", detail: "Single long option caps loss at paid premium" },
+    { name: "Defined risk", passed: candidate.contractType === "call" || candidate.contractType === "put", detail: "Long option leg is eligible only inside a capped-loss debit spread" },
     { name: "Premium cap", passed: premium <= maxPremium, detail: `$${premium.toFixed(0)} premium / $${maxPremium.toFixed(0)} limit` },
     { name: "Quote quality", passed: spread <= numberEnv("MAX_QUOTE_SPREAD_PCT", 0.18), detail: `${(spread * 100).toFixed(1)}% bid-ask spread` },
     { name: "Open interest", passed: (candidate.openInterest ?? 0) >= numberEnv("MIN_OPEN_INTEREST", 500), detail: `${candidate.openInterest ?? 0} contracts; minimum ${numberEnv("MIN_OPEN_INTEREST", 500)}` },
@@ -92,5 +92,5 @@ export function riskGates(candidate: Candidate, marketOpen: boolean, maxPremium:
 }
 
 export function thesis(candidate: Candidate) {
-  return `Long ${candidate.underlying} ${candidate.strike} call expiring ${candidate.expirationDate}. IV is ${(Math.abs(candidate.anomalyScore) * 100).toFixed(1)}% below its expiry median (${(candidate.impliedVolatility * 100).toFixed(1)}% vs ${(candidate.expiryMedianIv * 100).toFixed(1)}%).`;
+  return `Long ${candidate.underlying} ${candidate.strike} ${candidate.contractType} expiring ${candidate.expirationDate}. IV is ${(Math.abs(candidate.anomalyScore) * 100).toFixed(1)}% below its expiry median (${(candidate.impliedVolatility * 100).toFixed(1)}% vs ${(candidate.expiryMedianIv * 100).toFixed(1)}%).`;
 }
