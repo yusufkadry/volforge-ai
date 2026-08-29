@@ -13,6 +13,7 @@ export type Candidate = {
   expiryMedianIv: number;
   anomalyScore: number;
   delta?: number;
+  vega?: number;
   openInterest?: number;
   quoteTimestamp?: string;
   tradable: boolean;
@@ -78,6 +79,42 @@ export type ShadowPosition = {
   exit_reason?: string | null;
 };
 
+export type ExecutionIntent = {
+  id?: string;
+  created_at?: string;
+  updated_at?: string;
+  trace_id: string;
+  strategy_version: string;
+  idempotency_key: string;
+  stage: "paper";
+  status: "entry_pending" | "entry_submitted" | "open" | "exit_submitted" | "closed" | "canceled" | "error";
+  underlying: string;
+  long_leg: string;
+  short_leg: string;
+  quantity: number;
+  entry_debit: number;
+  current_debit?: number | null;
+  max_loss: number;
+  max_reward: number;
+  entry_order_id?: string | null;
+  exit_order_id?: string | null;
+  exit_reason?: string | null;
+  metadata?: Record<string, unknown>;
+};
+
+export type CalibrationSnapshot = {
+  id?: string;
+  created_at?: string;
+  strategy_version: string;
+  sample_size: number;
+  predicted_ev: number;
+  realized_pnl: number;
+  predicted_win_rate: number;
+  realized_win_rate: number;
+  status: "warming" | "calibrated" | "degraded";
+  report: Record<string, unknown>;
+};
+
 export type DashboardSnapshot = {
   account: Record<string, unknown> | null;
   positions: Array<Record<string, unknown>>;
@@ -87,6 +124,9 @@ export type DashboardSnapshot = {
   research: ResearchRun[];
   shadowPositions: ShadowPosition[];
   riskSnapshot: Record<string, unknown> | null;
+  intents?: ExecutionIntent[];
+  calibration?: CalibrationSnapshot | null;
+  portfolioHistory?: { timestamp?: number[]; equity?: number[]; profit_loss?: number[]; profit_loss_pct?: number[] } | null;
   marketOpen: boolean;
   nextOpen: string | null;
   errors: string[];

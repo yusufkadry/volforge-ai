@@ -19,6 +19,7 @@ export const alpaca = {
   clock: () => request<{ is_open: boolean; next_open?: string }>(paperBase(), "/v2/clock"),
   positions: () => request<Array<Record<string, unknown>>>(paperBase(), "/v2/positions"),
   orders: () => request<Array<Record<string, unknown>>>(paperBase(), "/v2/orders?status=open&direction=desc&limit=20"),
+  portfolioHistory: () => request<{ timestamp?: number[]; equity?: number[]; profit_loss?: number[]; profit_loss_pct?: number[] }>(paperBase(), "/v2/account/portfolio/history?period=1M&timeframe=1D"),
   accountConfig: () => request<Record<string, unknown>>(paperBase(), "/v2/account/configurations"),
   updateAccountConfig: (body: Record<string, unknown>) => request<Record<string, unknown>>(paperBase(), "/v2/account/configurations", {
     method: "PATCH", body: JSON.stringify(body),
@@ -35,6 +36,10 @@ export const alpaca = {
   stockBars: (symbols: string[], start: string, end: string) => request<{ bars?: Record<string, Array<Record<string, unknown>>> }>(
     dataBase(),
     `/v2/stocks/bars?symbols=${encodeURIComponent(symbols.join(","))}&timeframe=1Day&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&adjustment=all&feed=iex&limit=10000`,
+  ),
+  news: (symbols: string[], limit = 30) => request<{ news?: Array<Record<string, unknown>> }>(
+    dataBase(),
+    `/v1beta1/news?symbols=${encodeURIComponent(symbols.join(","))}&limit=${limit}&sort=desc`,
   ),
   submitOrder: (body: Record<string, unknown>) => request<Record<string, unknown>>(paperBase(), "/v2/orders", {
     method: "POST", body: JSON.stringify(body),

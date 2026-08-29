@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, Bot, CircleDollarSign, Clock3, FlaskConical, LogOut, Play, RefreshCw, ShieldAlert, ShieldCheck, SlidersHorizontal, Sparkles, TriangleAlert, Zap } from "lucide-react";
+import { Activity, Bot, CircleDollarSign, Clock3, FlaskConical, LogOut, Play, RefreshCw, RotateCcw, ShieldAlert, ShieldCheck, SlidersHorizontal, Sparkles, TriangleAlert, Zap } from "lucide-react";
 import type { DashboardSnapshot, Decision } from "@/lib/types";
 
 const number = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
@@ -10,6 +10,12 @@ const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD
 function asNumber(value: unknown) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : 0; }
 function shortTime(value?: string) { return value ? new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", month: "short", day: "numeric" }).format(new Date(value)) : "No data"; }
 function statusTone(status: Decision["status"]) { return status === "SUBMITTED" ? "good" : status === "APPROVED" ? "accent" : status === "ERROR" ? "bad" : "neutral"; }
+function maxDrawdown(equity: number[]) {
+  let peak = 0;
+  let drawdown = 0;
+  equity.forEach((value) => { peak = Math.max(peak, value); if (peak > 0) drawdown = Math.min(drawdown, (value - peak) / peak); });
+  return drawdown;
+}
 
 function SurfacePlot({ decisions }: { decisions: Decision[] }) {
   const values = decisions.slice(0, 12).reverse().map((decision) => asNumber(decision.score));
@@ -73,6 +79,13 @@ export default function DashboardClient() {
     setNotice(response.ok ? `Hard kill active. ${body.canceled_orders} open orders canceled.` : body.error ?? "Hard kill failed");
     void refresh();
   }
+  async function rearmBroker() {
+    if (!window.confirm("Re-enable Alpaca paper-order capability? Paper trading remains disabled until you explicitly arm it.")) return;
+    const response = await fetch("/api/controls/rearm", { method: "POST" });
+    const body = await response.json();
+    setNotice(response.ok ? "Alpaca paper broker re-armed. Trading remains disabled." : body.error ?? "Broker re-arm failed");
+    void refresh();
+  }
   const account = data?.account ?? {};
   const equity = asNumber(account.equity);
   const lastEquity = asNumber(account.last_equity);
@@ -94,6 +107,12 @@ export default function DashboardClient() {
     reward_risk?: number; expected_value?: number; payoff_probability?: number; kelly_fraction?: number; risk_budget?: number; quantity?: number;
   } | undefined;
   const allocationReady = allocation?.status === "ranked";
+  const intents = data?.intents ?? [];
+  const calibration = data?.calibration;
+  const equityCurve = data?.portfolioHistory?.equity ?? [];
+  const closedIntents = intents.filter((intent) => intent.status === "closed");
+  const realizedPnl = closedIntents.reduce((total, intent) => total + (asNumber(intent.current_debit) - asNumber(intent.entry_debit)) * 100 * asNumber(intent.quantity), 0);
+  const realizedWinRate = closedIntents.length ? closedIntents.filter((intent) => asNumber(intent.current_debit) > asNumber(intent.entry_debit)).length / closedIntents.length : 0;
 
   return <main className="app-shell">
     <header className="topbar">
@@ -136,6 +155,7 @@ export default function DashboardClient() {
           <label className="cap-input"><span>Max premium per trade</span><div><b>$</b><input type="number" min="1" value={data?.settings.max_premium_per_trade ?? 500} disabled={!data || saving} onChange={(event) => data && setData({ ...data, settings: { ...data.settings, max_premium_per_trade: Number(event.target.value) } })} onBlur={() => data && void saveSettings(data.settings)} /></div></label>
           <button className="primary-button run-button" type="button" disabled={!data || running} onClick={() => void runScan()}><Play size={17} fill="currentColor" />{running ? "Surface scan running" : "Run agent now"}</button>
           <button className="hard-kill" type="button" disabled={!data || saving} onClick={() => void hardKill()}><ShieldAlert size={16} />Hard kill and cancel orders</button>
+          <button className="rearm-button" type="button" disabled={!data || saving} onClick={() => void rearmBroker()}><RotateCcw size={15} />Re-arm broker</button>
           <p className="control-note"><Clock3 size={15} />Scheduled scan runs every five minutes on weekdays.</p>
         </section>
       </section>
@@ -150,6 +170,26 @@ export default function DashboardClient() {
           <div><span>Payoff probability</span><strong>{(asNumber(allocation.payoff_probability) * 100).toFixed(0)}%</strong><small>Conservative model proxy</small></div>
           <div><span>Fractional Kelly</span><strong>{(asNumber(allocation.kelly_fraction) * 100).toFixed(1)}%</strong><small>{money.format(asNumber(allocation.risk_budget))} loss ceiling</small></div>
         </div><p className="allocation-note">Long {latest?.option_symbol} / short {allocation.short_leg}. The allocator ranks executable debit spreads by payoff, liquidity, volatility edge, and capped risk before the Court can approve execution.</p></> : <p className="allocation-note muted">{allocation?.reason ?? "The payoff engine will publish an allocation after the next executable surface scan."}</p>}
+      </section>
+
+      <section className="panel ledger-panel">
+        <div className="panel-heading"><div><p className="eyebrow">EXECUTION LEDGER / BROKER RECONCILIATION</p><h2>Atomic spread lifecycle</h2></div><span className="score-chip">{intents.filter((intent) => ["entry_pending", "entry_submitted", "open", "exit_submitted"].includes(intent.status)).length} active</span></div>
+        <div className="table-wrap"><table><thead><tr><th>Time</th><th>Structure</th><th>State</th><th>Maximum loss</th><th>Broker IDs</th></tr></thead><tbody>
+          {intents.slice(0, 8).map((intent) => <tr key={intent.id ?? intent.idempotency_key}><td>{shortTime(intent.created_at)}</td><td><strong>{intent.underlying} debit spread</strong><span>{intent.long_leg} / {intent.short_leg}</span></td><td><span className={`status ${intent.status === "open" || intent.status === "closed" ? "good" : intent.status === "error" ? "bad" : "neutral"}`}>{intent.status.replace("_", " ")}</span></td><td>{money.format(asNumber(intent.max_loss))}</td><td><span className="ledger-id">{intent.entry_order_id ?? "Awaiting entry"}{intent.exit_order_id ? ` / ${intent.exit_order_id}` : ""}</span></td></tr>)}
+          {!intents.length && <tr><td colSpan={5} className="empty-cell">No broker execution intents yet. Paper orders are reserved here before Alpaca receives them.</td></tr>}
+        </tbody></table></div>
+      </section>
+
+      <section className="panel calibration-panel">
+        <div className="panel-heading"><div><p className="eyebrow">RELIABILITY LOOP / MODEL CALIBRATION</p><h2>Expected versus realized paper outcomes</h2></div><span className={`status ${calibration?.status === "degraded" ? "bad" : calibration?.status === "calibrated" ? "good" : "neutral"}`}>{calibration?.status ?? "warming"}</span></div>
+        <div className="calibration-grid"><div><span>Closed spreads</span><strong>{number.format(calibration?.sample_size ?? 0)}</strong></div><div><span>Predicted EV</span><strong>{money.format(asNumber(calibration?.predicted_ev))}</strong></div><div><span>Realized P&L</span><strong className={asNumber(calibration?.realized_pnl) >= 0 ? "positive-text" : "negative-text"}>{money.format(asNumber(calibration?.realized_pnl))}</strong></div><div><span>Predicted win rate</span><strong>{(asNumber(calibration?.predicted_win_rate) * 100).toFixed(0)}%</strong></div><div><span>Realized win rate</span><strong>{(asNumber(calibration?.realized_win_rate) * 100).toFixed(0)}%</strong></div></div>
+        <p className="allocation-note">VolForge records a calibration state after each closed spread. It warms up first, then blocks new paper exposure if realized outcomes materially diverge from the model’s claimed expectancy.</p>
+      </section>
+
+      <section className="panel calibration-panel">
+        <div className="panel-heading"><div><p className="eyebrow">JUDGE MODE / ALPACA PAPER PERFORMANCE</p><h2>Broker-backed performance record</h2></div><span className="score-chip">PAPER ACCOUNT</span></div>
+        <div className="calibration-grid"><div><span>Closed structures</span><strong>{number.format(closedIntents.length)}</strong></div><div><span>Realized P&L</span><strong className={realizedPnl >= 0 ? "positive-text" : "negative-text"}>{money.format(realizedPnl)}</strong></div><div><span>Win rate</span><strong>{(realizedWinRate * 100).toFixed(0)}%</strong></div><div><span>Maximum drawdown</span><strong className="negative-text">{(maxDrawdown(equityCurve) * 100).toFixed(2)}%</strong></div><div><span>Evidence trails</span><strong>{number.format(data?.decisions.length ?? 0)}</strong></div></div>
+        <p className="allocation-note">Performance is computed from reconciled paper structures; account drawdown is read from Alpaca portfolio-history equity data.</p>
       </section>
 
       <section className="research-grid">

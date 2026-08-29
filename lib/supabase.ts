@@ -1,5 +1,5 @@
 import { env } from "@/lib/env";
-import type { AgentSettings, Decision, ResearchRun, ShadowPosition } from "@/lib/types";
+import type { AgentSettings, CalibrationSnapshot, Decision, ExecutionIntent, ResearchRun, ShadowPosition } from "@/lib/types";
 
 function baseUrl() { return `${env("SUPABASE_URL").replace(/\/$/, "")}/rest/v1`; }
 
@@ -49,5 +49,35 @@ export const journal = {
   writeRiskSnapshot: (snapshot: Record<string, unknown>) => request<Array<Record<string, unknown>>>("/risk_snapshots", {
     method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify(snapshot),
   }),
+  writeObservations: (observations: Array<Record<string, unknown>>) => observations.length ? request<Array<Record<string, unknown>>>("/market_observations", {
+    method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify(observations),
+  }) : Promise.resolve([]),
+  writeEngineEvaluations: (evaluations: Array<Record<string, unknown>>) => evaluations.length ? request<Array<Record<string, unknown>>>("/engine_evaluations", {
+    method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify(evaluations),
+  }) : Promise.resolve([]),
   latestRiskSnapshot: async () => (await request<Array<Record<string, unknown>>>("/risk_snapshots?select=*&order=created_at.desc&limit=1"))[0] ?? null,
+  intents: () => request<ExecutionIntent[]>("/execution_intents?select=*&order=created_at.desc&limit=48"),
+  closedIntents: () => request<ExecutionIntent[]>("/execution_intents?status=eq.closed&select=*&order=created_at.desc&limit=200"),
+  activeIntents: () => request<ExecutionIntent[]>("/execution_intents?status=in.(entry_pending,entry_submitted,open,exit_submitted)&select=*&order=created_at.desc"),
+  activeIntentForUnderlying: async (underlying: string) => (await request<ExecutionIntent[]>(`/execution_intents?underlying=eq.${encodeURIComponent(underlying)}&status=in.(entry_pending,entry_submitted,open,exit_submitted)&select=*&order=created_at.desc&limit=1`))[0] ?? null,
+  intentByKey: async (key: string) => (await request<ExecutionIntent[]>(`/execution_intents?idempotency_key=eq.${encodeURIComponent(key)}&select=*&limit=1`))[0] ?? null,
+  reserveIntent: async (intent: ExecutionIntent) => {
+    const rows = await request<ExecutionIntent[]>("/execution_intents?on_conflict=idempotency_key", {
+      method: "POST", headers: { Prefer: "resolution=ignore-duplicates,return=representation" }, body: JSON.stringify(intent),
+    });
+    if (rows[0]) return { created: true, intent: rows[0] };
+    return { created: false, intent: await journal.intentByKey(intent.idempotency_key) };
+  },
+  updateIntent: (id: string, intent: Partial<ExecutionIntent>) => request<ExecutionIntent[]>(`/execution_intents?id=eq.${encodeURIComponent(id)}`, {
+    method: "PATCH", headers: { Prefer: "return=representation" }, body: JSON.stringify({ ...intent, updated_at: new Date().toISOString() }),
+  }),
+  intentByEntryOrder: async (orderId: string) => (await request<ExecutionIntent[]>(`/execution_intents?entry_order_id=eq.${encodeURIComponent(orderId)}&select=*&limit=1`))[0] ?? null,
+  intentByExitOrder: async (orderId: string) => (await request<ExecutionIntent[]>(`/execution_intents?exit_order_id=eq.${encodeURIComponent(orderId)}&select=*&limit=1`))[0] ?? null,
+  cancelActiveIntents: () => request<ExecutionIntent[]>("/execution_intents?status=in.(entry_pending,entry_submitted,open,exit_submitted)", {
+    method: "PATCH", headers: { Prefer: "return=representation" }, body: JSON.stringify({ status: "canceled", updated_at: new Date().toISOString(), exit_reason: "hard_kill" }),
+  }),
+  writeCalibration: (snapshot: CalibrationSnapshot) => request<CalibrationSnapshot[]>("/calibration_snapshots", {
+    method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify(snapshot),
+  }),
+  latestCalibration: async () => (await request<CalibrationSnapshot[]>("/calibration_snapshots?select=*&order=created_at.desc&limit=1"))[0] ?? null,
 };

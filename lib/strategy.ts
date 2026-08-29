@@ -4,6 +4,7 @@ import type { Candidate, RiskGate } from "@/lib/types";
 
 type RawCandidate = Omit<Candidate, "expiryMedianIv" | "anomalyScore"> & {
   delta: number | undefined;
+  vega: number | undefined;
   openInterest: number | undefined;
   quoteTimestamp: string;
 };
@@ -51,6 +52,7 @@ export async function scanSurface(symbol: string, contractType: "call" | "put" =
       ask: finite(quote.ap ?? quote.ask_price),
       impliedVolatility: finite(snapshot.impliedVolatility ?? snapshot.implied_volatility),
       delta: finite(greeks.delta),
+      vega: finite(greeks.vega),
       openInterest: finite(snapshot.openInterest ?? snapshot.open_interest ?? contract.open_interest),
       quoteTimestamp: String(quote.t ?? quote.timestamp ?? ""),
       tradable: contract.tradable !== false,

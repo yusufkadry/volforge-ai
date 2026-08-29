@@ -1,9 +1,10 @@
 import type { Candidate } from "@/lib/types";
 import type { TradePlan } from "@/lib/reward-engine";
+import type { WorldEvidence } from "@/lib/world-intelligence";
 
 type CriticVerdict = { approve: boolean; rationale: string };
 
-export async function critic(candidate: Candidate, plan?: TradePlan): Promise<CriticVerdict> {
+export async function critic(candidate: Candidate, plan?: TradePlan, world?: WorldEvidence): Promise<CriticVerdict> {
   const key = process.env.OPENAI_API_KEY;
   if (!key) return { approve: false, rationale: "LLM critic unavailable: OPENAI_API_KEY is not configured." };
 
@@ -22,6 +23,7 @@ export async function critic(candidate: Candidate, plan?: TradePlan): Promise<Cr
         netDebit: plan.debit, width: plan.width, maxLoss: plan.maxLoss, maxReward: plan.maxReward,
         rewardRisk: plan.rewardRisk, payoffProbability: plan.payoffProbability, expectedValue: plan.expectedValue, quantity: plan.quantity,
       } : "No executable spread passed the allocator",
+      world_intelligence: world ? { verdict: world.verdict, confidence: world.confidence, eventTags: world.eventTags, rationale: world.rationale } : "No world evidence",
     }),
   ].join("\n");
 

@@ -13,6 +13,10 @@ function number(value: unknown) { const parsed = Number(value); return Number.is
 function average(values: number[]) { return values.reduce((total, value) => total + value, 0) / Math.max(values.length, 1); }
 function std(values: number[]) { const mean = average(values); return Math.sqrt(average(values.map((value) => (value - mean) ** 2))); }
 function sigmoid(value: number) { return 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, value)))); }
+function percentile(values: number[], value: number) {
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.floor((sorted.length - 1) * value)))] ?? 0;
+}
 
 function dailyReturns(bars: Bar[]) {
   return bars.slice(1).map((bar, index) => Math.log(bar.c / bars[index].c));
@@ -96,6 +100,7 @@ function walkForward(samples: Sample[]) {
   const errors: number[] = [];
   const baselineErrors: number[] = [];
   const directions: boolean[] = [];
+  const stressOutcomes: Array<{ actualVol: number; error: number; directionCorrect: boolean; direction: number }> = [];
   for (let point = start; point < samples.length; point += 5) {
     const training = samples.slice(0, point);
     const test = samples.slice(point, Math.min(point + 5, samples.length));
@@ -103,12 +108,26 @@ function walkForward(samples: Sample[]) {
     const classifier = fitClassifier(training, 140);
     const baseline = average(training.slice(-20).map((sample) => sample.y));
     for (const sample of test) {
-      errors.push(Math.abs(predictRegression(model, sample.x) - sample.y));
+      const error = Math.abs(predictRegression(model, sample.x) - sample.y);
+      errors.push(error);
       baselineErrors.push(Math.abs(baseline - sample.y));
-      directions.push((predictClassifier(classifier, sample.x) >= 0.5) === Boolean(sample.direction));
+      const directionCorrect = (predictClassifier(classifier, sample.x) >= 0.5) === Boolean(sample.direction);
+      directions.push(directionCorrect);
+      stressOutcomes.push({ actualVol: sample.y, error, directionCorrect, direction: sample.direction });
     }
   }
-  return { mae: average(errors), baselineMae: average(baselineErrors), directionAccuracy: average(directions.map((value) => value ? 1 : 0)), observations: samples.length };
+  const highVolThreshold = percentile(stressOutcomes.map((outcome) => outcome.actualVol), 0.8);
+  const highVol = stressOutcomes.filter((outcome) => outcome.actualVol >= highVolThreshold);
+  const downside = stressOutcomes.filter((outcome) => outcome.direction === 0);
+  return {
+    mae: average(errors), baselineMae: average(baselineErrors), directionAccuracy: average(directions.map((value) => value ? 1 : 0)), observations: samples.length,
+    stress: {
+      highVolatilityMae: average(highVol.map((outcome) => outcome.error)),
+      highVolatilitySamples: highVol.length,
+      downsideDirectionAccuracy: average(downside.map((outcome) => outcome.directionCorrect ? 1 : 0)),
+      downsideSamples: downside.length,
+    },
+  };
 }
 
 export type ResearchForecast = { symbol: string; forecastRv: number; probabilityUp: number; validation: ReturnType<typeof walkForward>; featureValues: number[] };
