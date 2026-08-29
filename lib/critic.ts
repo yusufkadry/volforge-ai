@@ -15,7 +15,13 @@ export async function critic(candidate: Candidate, plan?: TradePlan): Promise<Cr
       strike: candidate.strike, bid: candidate.bid, ask: candidate.ask,
       iv: candidate.impliedVolatility, expiryMedianIv: candidate.expiryMedianIv,
       ivDiscount: candidate.anomalyScore, delta: candidate.delta, openInterest: candidate.openInterest,
-      payoff: plan ? { debit: plan.debit, maxLoss: plan.maxLoss, maxReward: plan.maxReward, rewardRisk: plan.rewardRisk, payoffProbability: plan.payoffProbability, expectedValue: plan.expectedValue, quantity: plan.quantity } : "No executable spread passed the allocator",
+      payoff: plan ? {
+        structure: `${candidate.contractType} debit spread`,
+        longLeg: { symbol: candidate.optionSymbol, strike: candidate.strike, bid: candidate.bid, ask: candidate.ask },
+        shortLeg: { symbol: plan.shortLeg.optionSymbol, strike: plan.shortLeg.strike, bid: plan.shortLeg.bid, ask: plan.shortLeg.ask },
+        netDebit: plan.debit, width: plan.width, maxLoss: plan.maxLoss, maxReward: plan.maxReward,
+        rewardRisk: plan.rewardRisk, payoffProbability: plan.payoffProbability, expectedValue: plan.expectedValue, quantity: plan.quantity,
+      } : "No executable spread passed the allocator",
     }),
   ].join("\n");
 

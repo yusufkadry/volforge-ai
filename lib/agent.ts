@@ -54,7 +54,7 @@ export async function runAgent(source: "scheduled" | "manual" = "scheduled") {
     source, underlying: candidate.underlying, option_symbol: candidate.optionSymbol, side: "buy",
     score: candidate.anomalyScore, implied_volatility: candidate.impliedVolatility,
     expected_move: forecast?.forecastRv ?? null, status: approved ? "APPROVED" : "REJECTED",
-    rationale: `${thesis(candidate)} ${criticResult.rationale}`, risk_gates: gates,
+    rationale: `${thesis(candidate)}${tradePlan ? ` Proposed ${candidate.contractType} debit spread: buy ${candidate.optionSymbol} at $${candidate.ask.toFixed(2)}, sell ${tradePlan.shortLeg.optionSymbol} at $${tradePlan.shortLeg.bid.toFixed(2)}, net debit $${tradePlan.debit.toFixed(2)}. Maximum loss $${tradePlan.maxLoss.toFixed(2)} and maximum reward $${tradePlan.maxReward.toFixed(2)} per spread.` : ""} ${criticResult.rationale}`, risk_gates: gates,
     trace_id, strategy_version: STRATEGY_VERSION, model_score: forecast?.validation.directionAccuracy ?? null,
     data_freshness_ms: candidate.quoteTimestamp ? Math.max(0, Date.now() - new Date(candidate.quoteTimestamp).getTime()) : null,
     raw: {
