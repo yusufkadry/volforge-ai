@@ -89,7 +89,7 @@ export default function DashboardClient() {
   const account = data?.account ?? {};
   const equity = asNumber(account.equity);
   const lastEquity = asNumber(account.last_equity);
-  const pnl = equity - lastEquity;
+  const pnl = lastEquity > 0 ? equity - lastEquity : 0;
   const latest = data?.decisions[0];
   const warnings = data?.errors ?? [];
   const score = latest?.score ?? 0;

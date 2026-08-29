@@ -8,7 +8,8 @@ function number(value: unknown) { const parsed = Number(value); return Number.is
 export async function createRiskSnapshot(traceId: string, settings: AgentSettings) {
   const [account, positions, intents] = await Promise.all([alpaca.account(), alpaca.positions(), journal.activeIntents()]);
   const equity = number(account.equity);
-  const dailyPnl = equity - number(account.last_equity);
+  const priorClose = number(account.last_equity);
+  const dailyPnl = priorClose > 0 ? equity - priorClose : 0;
   const optionPositions = positions.filter((position) => String(position.asset_class) === "us_option");
   const structureRisk = intents.reduce((total, intent) => total + number(intent.max_loss), 0);
   const premiumAtRisk = structureRisk || optionPositions.reduce((total, position) => total + Math.abs(number(position.market_value)), 0);
