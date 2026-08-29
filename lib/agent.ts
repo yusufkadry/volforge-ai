@@ -47,7 +47,7 @@ export async function runAgent(source: "scheduled" | "manual" = "scheduled") {
     rationale: `${thesis(candidate)} ${criticResult.rationale}`, risk_gates: gates,
     trace_id, strategy_version: STRATEGY_VERSION, model_score: forecast?.validation.directionAccuracy ?? null,
     data_freshness_ms: candidate.quoteTimestamp ? Math.max(0, Date.now() - new Date(candidate.quoteTimestamp).getTime()) : null,
-    raw: { constitution_hash: constitutionHash(), evidence_hash: court.evidenceHash, research_trace_id: research.run.trace_id, forecast, court: court.opinions, risk_snapshot: riskSnapshot, position_actions },
+    raw: { constitution_hash: constitutionHash(), evidence_hash: court.evidenceHash, research_trace_id: research.run.trace_id, forecast, court: court.opinions, risk_snapshot: riskSnapshot, position_actions: positionActions },
   };
 
   if (!approved) return write(decision);
