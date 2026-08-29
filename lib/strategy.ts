@@ -5,6 +5,7 @@ import type { Candidate, RiskGate } from "@/lib/types";
 type RawCandidate = Omit<Candidate, "expiryMedianIv" | "anomalyScore"> & {
   delta: number | undefined;
   openInterest: number | undefined;
+  quoteTimestamp: string;
 };
 
 const asNumber = (value: unknown) => typeof value === "number" ? value : Number(value);
@@ -27,9 +28,9 @@ function median(values: number[]) {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
-export async function scanSurface(symbol: string): Promise<Candidate[]> {
+export async function scanSurface(symbol: string, contractType: "call" | "put" = "call"): Promise<Candidate[]> {
   const [contractsResponse, snapshotsResponse] = await Promise.all([
-    alpaca.contracts(symbol, isoDate(numberEnv("MIN_DTE", 14)), isoDate(numberEnv("MAX_DTE", 45))),
+    alpaca.contracts(symbol, isoDate(numberEnv("MIN_DTE", 21)), isoDate(numberEnv("MAX_DTE", 35)), contractType),
     alpaca.snapshots(symbol),
   ]);
   const snapshots = snapshotsResponse.snapshots ?? {};
@@ -51,6 +52,7 @@ export async function scanSurface(symbol: string): Promise<Candidate[]> {
       impliedVolatility: finite(snapshot.impliedVolatility ?? snapshot.implied_volatility),
       delta: finite(greeks.delta),
       openInterest: finite(snapshot.openInterest ?? snapshot.open_interest ?? contract.open_interest),
+      quoteTimestamp: String(quote.t ?? quote.timestamp ?? ""),
       tradable: contract.tradable !== false,
     };
   }).filter((row): row is RawCandidate => Boolean(
@@ -75,11 +77,14 @@ export function riskGates(candidate: Candidate, marketOpen: boolean, maxPremium:
   const spread = midpoint > 0 ? (candidate.ask - candidate.bid) / midpoint : Infinity;
   const minDte = numberEnv("MIN_DTE", 14);
   const maxDte = numberEnv("MAX_DTE", 45);
+  const quoteAge = candidate.quoteTimestamp ? Date.now() - new Date(candidate.quoteTimestamp).getTime() : Number.POSITIVE_INFINITY;
   return [
     { name: "Market session", passed: marketOpen, detail: marketOpen ? "Alpaca reports market open" : "Market is closed" },
     { name: "Defined risk", passed: candidate.contractType === "call", detail: "Single long option caps loss at paid premium" },
     { name: "Premium cap", passed: premium <= maxPremium, detail: `$${premium.toFixed(0)} premium / $${maxPremium.toFixed(0)} limit` },
     { name: "Quote quality", passed: spread <= numberEnv("MAX_QUOTE_SPREAD_PCT", 0.18), detail: `${(spread * 100).toFixed(1)}% bid-ask spread` },
+    { name: "Open interest", passed: (candidate.openInterest ?? 0) >= numberEnv("MIN_OPEN_INTEREST", 500), detail: `${candidate.openInterest ?? 0} contracts; minimum ${numberEnv("MIN_OPEN_INTEREST", 500)}` },
+    { name: "Data freshness", passed: quoteAge <= numberEnv("MAX_DATA_AGE_MS", 120000), detail: Number.isFinite(quoteAge) ? `${Math.max(0, Math.round(quoteAge / 1000))} seconds old` : "Missing quote timestamp" },
     { name: "Tenor", passed: candidate.dte >= minDte && candidate.dte <= maxDte, detail: `${candidate.dte} DTE; allowed ${minDte}-${maxDte}` },
     { name: "Tradability", passed: candidate.tradable, detail: candidate.tradable ? "Contract tradable" : "Contract not tradable" },
   ];
