@@ -92,5 +92,6 @@ export function riskGates(candidate: Candidate, marketOpen: boolean, maxPremium:
 }
 
 export function thesis(candidate: Candidate) {
-  return `Long ${candidate.underlying} ${candidate.strike} ${candidate.contractType} expiring ${candidate.expirationDate}. IV is ${(Math.abs(candidate.anomalyScore) * 100).toFixed(1)}% below its expiry median (${(candidate.impliedVolatility * 100).toFixed(1)}% vs ${(candidate.expiryMedianIv * 100).toFixed(1)}%).`;
+  const relation = candidate.anomalyScore < 0 ? "below" : "above";
+  return `Long ${candidate.underlying} ${candidate.strike} ${candidate.contractType} expiring ${candidate.expirationDate}. IV is ${(Math.abs(candidate.anomalyScore) * 100).toFixed(1)}% ${relation} its expiry median (${(candidate.impliedVolatility * 100).toFixed(1)}% vs ${(candidate.expiryMedianIv * 100).toFixed(1)}%).`;
 }
