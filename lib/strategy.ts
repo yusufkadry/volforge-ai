@@ -84,6 +84,7 @@ export function riskGates(candidate: Candidate, marketOpen: boolean, maxPremium:
     { name: "Premium cap", passed: premium <= maxPremium, detail: `$${premium.toFixed(0)} premium / $${maxPremium.toFixed(0)} limit` },
     { name: "Quote quality", passed: spread <= numberEnv("MAX_QUOTE_SPREAD_PCT", 0.18), detail: `${(spread * 100).toFixed(1)}% bid-ask spread` },
     { name: "Open interest", passed: (candidate.openInterest ?? 0) >= numberEnv("MIN_OPEN_INTEREST", 500), detail: `${candidate.openInterest ?? 0} contracts; minimum ${numberEnv("MIN_OPEN_INTEREST", 500)}` },
+    { name: "Delta target", passed: (candidate.delta ?? 0) >= numberEnv("MIN_DELTA", 0.30) && (candidate.delta ?? 0) <= numberEnv("MAX_DELTA", 0.65), detail: `Delta ${(candidate.delta ?? 0).toFixed(3)}; target ${numberEnv("MIN_DELTA", 0.30).toFixed(2)}-${numberEnv("MAX_DELTA", 0.65).toFixed(2)}` },
     { name: "Data freshness", passed: quoteAge <= numberEnv("MAX_DATA_AGE_MS", 120000), detail: Number.isFinite(quoteAge) ? `${Math.max(0, Math.round(quoteAge / 1000))} seconds old` : "Missing quote timestamp" },
     { name: "Tenor", passed: candidate.dte >= minDte && candidate.dte <= maxDte, detail: `${candidate.dte} DTE; allowed ${minDte}-${maxDte}` },
     { name: "Tradability", passed: candidate.tradable, detail: candidate.tradable ? "Contract tradable" : "Contract not tradable" },

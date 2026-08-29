@@ -19,7 +19,7 @@ export async function runAgent(source: "scheduled" | "manual" = "scheduled") {
   const researchBySymbol = new Map(research.forecasts.map((forecast) => [forecast.symbol, forecast]));
   const scans = await Promise.allSettled(universe().map(async (symbol) => {
     const forecast = researchBySymbol.get(symbol);
-    if (!forecast || forecast.probabilityUp === 0.5) return [];
+    if (!forecast || forecast.probabilityUp === 0.5 || forecast.validation.mae >= forecast.validation.baselineMae || forecast.validation.directionAccuracy < 0.52) return [];
     const type: "call" | "put" = forecast.probabilityUp > 0.5 ? "call" : "put";
     return scanSurface(symbol, type);
   }));

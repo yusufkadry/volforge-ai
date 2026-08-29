@@ -5,7 +5,8 @@ export function env(name: string, fallback?: string) {
 }
 
 export function numberEnv(name: string, fallback: number) {
-  const value = Number(process.env[name] ?? fallback);
+  const raw = process.env[name]?.trim();
+  const value = raw ? Number(raw) : fallback;
   if (!Number.isFinite(value)) throw new Error(`Invalid number in ${name}`);
   return value;
 }
