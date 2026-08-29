@@ -33,7 +33,7 @@ export const journal = {
     method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify(run),
   }),
   strategy: (version: string) => request<Array<Record<string, unknown>>>(`/strategy_versions?version=eq.${encodeURIComponent(version)}&select=*`),
-  writeStrategy: (strategy: Record<string, unknown>) => request<Array<Record<string, unknown>>>("/strategy_versions", {
+  writeStrategy: (strategy: Record<string, unknown>) => request<Array<Record<string, unknown>>>("/strategy_versions?on_conflict=version", {
     method: "POST", headers: { Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify(strategy),
   }),
   shadowPositions: () => request<ShadowPosition[]>("/shadow_positions?select=*&order=created_at.desc&limit=48"),
