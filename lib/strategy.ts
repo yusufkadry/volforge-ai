@@ -2,6 +2,11 @@ import { alpaca } from "@/lib/alpaca";
 import { numberEnv } from "@/lib/env";
 import type { Candidate, RiskGate } from "@/lib/types";
 
+type RawCandidate = Omit<Candidate, "expiryMedianIv" | "anomalyScore"> & {
+  delta: number | undefined;
+  openInterest: number | undefined;
+};
+
 const asNumber = (value: unknown) => typeof value === "number" ? value : Number(value);
 const finite = (value: unknown) => Number.isFinite(asNumber(value)) ? asNumber(value) : undefined;
 
@@ -48,7 +53,7 @@ export async function scanSurface(symbol: string): Promise<Candidate[]> {
       openInterest: finite(snapshot.openInterest ?? snapshot.open_interest ?? contract.open_interest),
       tradable: contract.tradable !== false,
     };
-  }).filter((row): row is Omit<Candidate, "expiryMedianIv" | "anomalyScore"> => Boolean(
+  }).filter((row): row is RawCandidate => Boolean(
     row.optionSymbol && row.expirationDate && row.strike !== undefined && row.bid !== undefined && row.ask !== undefined && row.impliedVolatility !== undefined,
   ));
 
