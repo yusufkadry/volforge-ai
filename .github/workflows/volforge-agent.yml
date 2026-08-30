@@ -1,0 +1,65 @@
+name: VolForge autonomous options agent
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 12-22 * * 1-5"
+
+permissions:
+  contents: read
+
+jobs:
+  scan-and-trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+      - name: Install Alpaca CLI
+        run: |
+          go install github.com/alpacahq/cli/cmd/alpaca@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      - name: Alpaca CLI paper preflight
+        run: |
+          alpaca clock --quiet > /dev/null
+          alpaca account get --quiet > /dev/null
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+      - run: npm install
+      - run: npm run agent:run
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          ALPACA_PAPER_BASE_URL: ${{ secrets.ALPACA_PAPER_BASE_URL }}
+          ALPACA_DATA_BASE_URL: ${{ secrets.ALPACA_DATA_BASE_URL }}
+          ALPACA_OPTIONS_FEED: ${{ secrets.ALPACA_OPTIONS_FEED }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+          VOLFORGE_UNIVERSE: ${{ secrets.VOLFORGE_UNIVERSE }}
+          MAX_PREMIUM_PER_TRADE: ${{ secrets.MAX_PREMIUM_PER_TRADE }}
+          MAX_QUOTE_SPREAD_PCT: ${{ secrets.MAX_QUOTE_SPREAD_PCT }}
+          MIN_DTE: ${{ secrets.MIN_DTE }}
+          MAX_DTE: ${{ secrets.MAX_DTE }}
+          MIN_OPEN_INTEREST: ${{ secrets.MIN_OPEN_INTEREST }}
+          MAX_DATA_AGE_MS: ${{ secrets.MAX_DATA_AGE_MS }}
+          MIN_DELTA: ${{ secrets.MIN_DELTA }}
+          MAX_DELTA: ${{ secrets.MAX_DELTA }}
+          ENABLE_MULTI_LEG: ${{ secrets.ENABLE_MULTI_LEG }}
+          MIN_IV_DISCOUNT: ${{ secrets.MIN_IV_DISCOUNT }}
+          MIN_REWARD_RISK: ${{ secrets.MIN_REWARD_RISK }}
+          MIN_EXPECTED_VALUE: ${{ secrets.MIN_EXPECTED_VALUE }}
+          MAX_RISK_PER_TRADE_PCT: ${{ secrets.MAX_RISK_PER_TRADE_PCT }}
+          MIN_FORECAST_EDGE: ${{ secrets.MIN_FORECAST_EDGE }}
+          MAX_VERTICAL_WIDTH: ${{ secrets.MAX_VERTICAL_WIDTH }}
+          MAX_CONTRACTS_PER_ORDER: ${{ secrets.MAX_CONTRACTS_PER_ORDER }}
+          MAX_PORTFOLIO_RISK_PCT: ${{ secrets.MAX_PORTFOLIO_RISK_PCT }}
+          MAX_NET_DELTA: ${{ secrets.MAX_NET_DELTA }}
+          MAX_NET_VEGA: ${{ secrets.MAX_NET_VEGA }}
