@@ -10,18 +10,22 @@ export async function critic(candidate: Candidate, plan?: TradePlan, world?: Wor
 
   const prompt = [
     "You are a skeptical options risk critic. Return only JSON with boolean approve and a concise rationale.",
-    "Approve only if this is a liquid, bounded-risk debit spread with a meaningful valuation edge, positive expected value, and reward-to-risk above 1.25. Reject ambiguous or weak cases.",
+    "The numerical engines are authoritative. Approve only if the evidence is internally consistent, liquid, bounded-risk, horizon-matched, and positive in both base and adverse-stress valuation. Reject ambiguity, contradictory assumptions, or unmodeled jump risk. Never invent missing values.",
     JSON.stringify({
       symbol: candidate.optionSymbol, underlying: candidate.underlying, dte: candidate.dte,
       strike: candidate.strike, bid: candidate.bid, ask: candidate.ask,
-      iv: candidate.impliedVolatility, expiryMedianIv: candidate.expiryMedianIv,
-      ivDiscount: candidate.anomalyScore, delta: candidate.delta, openInterest: candidate.openInterest,
+      spot: candidate.spot, iv: candidate.impliedVolatility, fittedSurfaceIv: candidate.surface.fairIv,
+      relativeResidual: candidate.surface.relativeResidual, residualZScore: candidate.surface.residualZScore, surfaceNeighbors: candidate.surface.neighborCount,
+      delta: candidate.delta, openInterest: candidate.openInterest, dataFeed: candidate.dataFeed,
       payoff: plan ? {
         structure: `${candidate.contractType} debit spread`,
         longLeg: { symbol: candidate.optionSymbol, strike: candidate.strike, bid: candidate.bid, ask: candidate.ask },
         shortLeg: { symbol: plan.shortLeg.optionSymbol, strike: plan.shortLeg.strike, bid: plan.shortLeg.bid, ask: plan.shortLeg.ask },
-        netDebit: plan.debit, width: plan.width, maxLoss: plan.maxLoss, maxReward: plan.maxReward,
-        rewardRisk: plan.rewardRisk, payoffProbability: plan.payoffProbability, expectedValue: plan.expectedValue, quantity: plan.quantity,
+        initialLimit: plan.debit, maximumApprovedDebit: plan.maxEntryDebit, naturalDebit: plan.naturalDebit,
+        width: plan.width, maxLoss: plan.maxLoss, maxReward: plan.maxReward, rewardRisk: plan.rewardRisk,
+        payoffProbability: plan.payoffProbability, baseExpectedValue: plan.baseExpectedValue, stressedExpectedValue: plan.stressedExpectedValue,
+        conservativeExpectedValue: plan.expectedValue, cvar95: plan.valuation.cvar95, quantity: plan.quantity,
+        valuationHorizonDays: plan.valuationHorizonDays, holdingHorizonDays: plan.holdingHorizonDays, assumptions: plan.valuation.assumptions,
       } : "No executable spread passed the allocator",
       world_intelligence: world ? { verdict: world.verdict, confidence: world.confidence, eventTags: world.eventTags, rationale: world.rationale } : "No world evidence",
     }),
@@ -36,6 +40,7 @@ export async function critic(candidate: Candidate, plan?: TradePlan, world?: Wor
         response_format: { type: "json_object" },
         messages: [{ role: "user", content: prompt }],
       }),
+      signal: AbortSignal.timeout(20_000),
     });
     if (!response.ok) throw new Error(`critic returned ${response.status}`);
     const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }> };

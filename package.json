@@ -2,14 +2,19 @@
   "name": "volforge-ai",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
     "agent:run": "tsx scripts/run-agent.ts",
     "research:run": "tsx scripts/run-research-factory.ts",
-    "worker:trade-stream": "tsx worker/trade-stream.ts"
+    "cli:record": "tsx scripts/record-cli-preflight.ts",
+    "account:attest": "tsx scripts/attest-competition-account.ts",
+    "worker:trade-stream": "tsx worker/trade-stream.ts",
+    "worker:control-plane": "tsx worker/control-plane.ts"
   },
   "dependencies": {
     "@msgpack/msgpack": "^3.1.2",
@@ -26,5 +31,8 @@
     "@types/ws": "^8.5.13",
     "typescript": "^5.7.2",
     "tsx": "^4.19.2"
+  },
+  "overrides": {
+    "postcss": "8.5.23"
   }
 }

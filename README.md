@@ -1,58 +1,177 @@
 # VolForge AI
 
-VolForge is an autonomous, paper-only options agent that searches for implied-volatility surface distortions, asks an LLM critic to challenge each proposal, enforces deterministic risk gates, and records its full decision trail.
+VolForge is an autonomous options research, shadow-validation, and Alpaca paper-execution control plane. It promotes evidence through three capital stages: statistically validated research, an executable-price shadow digital twin, and atomic defined-risk paper spreads.
 
-The competitive build adds a numerical realized-volatility research model, walk-forward baseline validation, a frozen strategy constitution, a shadow portfolio, promotion stages, broker-level hard kill, and an Alpaca trade-update worker.
+The system is designed for the Alpaca AI Trading Agents Hackathon. It uses Alpaca Trading and Market Data APIs, Alpaca CLI preflights, Level 3 multi-leg options orders, GitHub Actions, an always-on Railway execution worker, Supabase, OpenAI, and a protected Vercel command room.
 
-## Architecture
+## What makes it different
+
+VolForge does not ask an LLM to invent a trade. Independent numerical engines produce auditable evidence:
+
+| Engine | Authority |
+|---|---|
+| Surface | Fits robust IV against log-moneyness and tenor, then measures liquid local residuals and z-scores. |
+| Regime | Trains horizon-specific volatility and direction models with purged walk-forward validation and embargoes. |
+| Distribution | Integrates vertical-spread mark-forward P&L across calibrated base, fat-tail, and adverse stress scenarios. |
+| Event Intelligence | Deduplicates and scores source-qualified news by recency, event type, impact, and contradiction. It may veto only. |
+| Portfolio Governor | Enforces defined loss, concentration, delta, vega, CVaR, session, deadline, and account-level limits. |
+| Red Team | Challenges evidence consistency. The LLM can veto but can never override deterministic controls. |
+| Execution | Reserves idempotent intent, submits atomic `mleg` orders, ladders limits, reconciles REST and stream truth, and manages exits. |
+
+Every model decision stores a strategy version, constitution hash, dataset hash, model manifest, validation evidence, quote feed, market trace, court opinions, risk snapshot, and broker lifecycle.
+
+## Runtime architecture
 
 | Service | Responsibility |
-| --- | --- |
-| GitHub Actions | Runs the autonomous agent every five minutes on weekdays and a separate no-trade research factory every four hours on weekends. The weekday agent runs the official Alpaca CLI paper preflight before the AI loop. |
-| Vercel | Private dashboard, live Alpaca account view, manual scan control. |
-| Supabase | Immutable decision journal, market evidence, engine verdicts, execution intents, broker events, calibration snapshots, and the trading-enabled kill switch. |
-| Alpaca Paper | Options market data, account, positions, and paper orders. |
+|---|---|
+| Railway | Primary five-minute strategy cycle, 30-second broker reconciliation, position supervision, emergency liquidation, and Alpaca trade stream. |
+| GitHub Actions | Independent 15-minute market watchdog, pinned Alpaca CLI entry oracle, four-hour research factory, premarket refresh, CI, and competition-account attestation. |
+| Vercel | Password-protected command room. Manual scans are durable commands consumed by Railway, not long-running Vercel requests. |
+| Supabase | Immutable decisions, research runs, model manifests, shadow marks, execution intents, order events, leases, heartbeats, calibration, and settings. |
+| Alpaca Paper | Account truth, market data, options contracts, atomic multi-leg paper orders, positions, and portfolio history. |
 
-The browser never receives an Alpaca, Supabase service-role, or OpenAI key. The dashboard calls server-side routes only.
+Railway and GitHub share a renewable Supabase lease. Dashboard requests enter a durable, deduplicated command queue that Railway claims under the same lease, so only one process may make a capital decision at a time.
 
-## Deploy without a terminal
+## Required deployment update
 
-1. In GitHub, create an empty private repository named `volforge-ai` and upload this folder's contents through **Add file > Upload files**.
-2. In Supabase, create a project. Open **SQL Editor**, paste [supabase/schema.sql](supabase/schema.sql), and click **Run**. If you already deployed VolForge before this version, run [supabase/upgrade_v3.sql](supabase/upgrade_v3.sql) once **before** deploying the new app. It adds the execution ledger, engine evidence, and calibration tables.
-3. In Vercel, click **Add New > Project**, import the GitHub repository, accept the detected Next.js settings, and add every value from `.env.example` under **Settings > Environment Variables**. Add them to Production and Preview.
-4. In the GitHub repository, open **Settings > Secrets and variables > Actions** and add the same values used by the agent: `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_PAPER_BASE_URL`, `ALPACA_DATA_BASE_URL`, `ALPACA_OPTIONS_FEED`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `VOLFORGE_UNIVERSE`, `MAX_PREMIUM_PER_TRADE`, `MAX_QUOTE_SPREAD_PCT`, `MIN_DTE`, `MAX_DTE`, `MIN_OPEN_INTEREST`, `MAX_DATA_AGE_MS`, `MIN_DELTA=0.30`, `MAX_DELTA=0.65`, `ENABLE_MULTI_LEG=true`, `MIN_IV_DISCOUNT=0.03`, `MIN_REWARD_RISK=1.25`, `MIN_EXPECTED_VALUE=8`, `MAX_RISK_PER_TRADE_PCT=0.005`, `MIN_FORECAST_EDGE=0.02`, `MAX_VERTICAL_WIDTH=10`, `MAX_CONTRACTS_PER_ORDER=5`, `MAX_PORTFOLIO_RISK_PCT=0.015`, `MAX_NET_DELTA=250`, and `MAX_NET_VEGA=300`. Values left absent use the code defaults.
-5. In Railway, create a **New Project > Deploy from GitHub repo**, select this repository, and add: `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, plus optional `ALPACA_TRADE_STREAM_URL=https://paper-api.alpaca.markets/stream`. Railway reads `railway.toml` and starts the broker-event worker automatically.
-6. Open the deployed Vercel URL. Log in with `DASHBOARD_PASSWORD`. The agent starts in **Research**. Promote it to **Shadow**, collect evidence, then promote it to **Paper** and arm paper trading only after inspection.
+For an existing VolForge database, open **Supabase > SQL Editor**, paste the complete contents of [`supabase/upgrade_v4.sql`](supabase/upgrade_v4.sql), and run it once. It is idempotent and reloads the PostgREST schema cache.
 
-Vercel's own password protection for a production URL is a paid feature. This project includes its own password gate, so the dashboard remains private on the free tier. Vercel credentials can be added as a second layer later.
+For a new Supabase project, run [`supabase/schema.sql`](supabase/schema.sql) instead. It contains the consolidated schema including v4.
 
-## Agent logic
+Then commit this repository. Vercel, Railway, and GitHub Actions redeploy from GitHub.
 
-1. The research factory trains a regularized realized-volatility regression and direction classifier from historical stock bars. It evaluates both with rolling walk-forward validation against a naive volatility baseline, then reports out-of-sample high-volatility MAE and downside-direction diagnostics as stress evidence.
-2. The surface agent fetches the live chain in the model-predicted direction, normalizes IV by expiry, then generates every executable vertical debit-spread payoff available for that chain.
-3. The payoff engine filters out unreliable quotes before payoff math: each long leg must meet directional delta, open-interest, tradability, and a hard 5% executable-spread ceiling; spread width is capped at $10 and order quantity at five contracts. It then ranks surviving structures by maximum reward versus maximum loss, a conservative model-weighted payoff probability, expected value, liquidity, and a capped fractional-Kelly allocation. It never uses naked option exposure.
-4. The critic agent receives the market thesis and complete payoff geometry, then must return a structured `approve` or `reject` verdict.
-5. World Intelligence classifies current Alpaca news into directional catalysts, volatility shocks, and contradictory event risk. It produces a short-lived typed verdict; it can veto an order but cannot submit one.
-6. The Portfolio Governor independently blocks entries outside liquid session windows, duplicate underlying exposure, excess defined loss, and excessive approximate delta or vega.
-7. A validated strategy advances through `research → shadow → paper`. Shadow positions are logged at adverse executable bid/ask prices. Only a promoted, armed strategy can reserve an idempotent execution intent and submit an atomic, defined-risk debit spread to Alpaca.
-8. The spread sentinel only exits matched two-leg structures and sends `sell_to_close` / `buy_to_close` MLeg orders. Railway decodes Alpaca paper trade-stream binary frames, reconciles broker events, and advances intent state.
-9. The calibration loop compares the model’s expected value and payoff probability against closed paper-spread outcomes. It eventually vetoes new exposure when enough results demonstrate materially degraded expectancy.
+## Environment placement
 
-VolForge requires `ENABLE_MULTI_LEG=true` and Alpaca paper options trading level 3 or higher. It fails closed rather than replacing a defined-risk spread with a lower-quality single-leg order. The dashboard records the payoff, risk budget, expected value, reward-to-risk, and allocation quantity on every decision.
+The authoritative list and defaults are in [`.env.example`](.env.example).
 
-## Hackathon checklist
+### Vercel
 
-- [x] Autonomous scheduled agent
-- [x] Alpaca Trading API and paper account support
-- [x] Options strategy and execution path
-- [x] Numerical ML research factory with walk-forward validation
-- [x] AI critic, strategy constitution, shadow book, promotion gate, and deterministic risk gates
-- [x] Position sentinel, hard kill, cancellation, and Alpaca order-event worker
-- [x] Protected live control dashboard
-- [x] Decision journal for presentation and one-page write-up
-- [x] Official Alpaca CLI invoked on every autonomous GitHub Actions run (`alpaca clock`, `alpaca account get`)
-- [ ] Create the required fresh $100,000 competition paper account for final judging
+Required secrets:
 
-## Important
+- `ALPACA_API_KEY`
+- `ALPACA_SECRET_KEY`
+- `ALPACA_PAPER_BASE_URL=https://paper-api.alpaca.markets`
+- `ALPACA_DATA_BASE_URL=https://data.alpaca.markets`
+- `ALPACA_OPTIONS_FEED=indicative` or `opra` when entitled
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL`
+- `DASHBOARD_PASSWORD`
+- `AUTH_SECRET`
 
-This is paper-trading software, not financial advice. Do not reuse these credentials or controls for real-money trading.
+Add optional strategy variables from `.env.example` only when overriding the audited defaults.
+
+### GitHub Actions
+
+Under **Settings > Secrets and variables > Actions**, add:
+
+- `ALPACA_API_KEY`
+- `ALPACA_SECRET_KEY`
+- `ALPACA_PAPER_BASE_URL`
+- `ALPACA_DATA_BASE_URL`
+- `ALPACA_OPTIONS_FEED`
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL`
+- `VOLFORGE_UNIVERSE`
+
+Existing numerical override secrets in `volforge-agent.yml` remain supported. Workflow files must live under `.github/workflows/`, not at the repository root.
+
+### Railway
+
+Railway runs the full control plane and needs:
+
+- `ALPACA_API_KEY`
+- `ALPACA_SECRET_KEY`
+- `ALPACA_PAPER_BASE_URL`
+- `ALPACA_DATA_BASE_URL`
+- `ALPACA_TRADE_STREAM_URL=wss://paper-api.alpaca.markets/stream`
+- `ALPACA_OPTIONS_FEED`
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL`
+- `VOLFORGE_UNIVERSE`
+
+Railway reads `railway.toml` and starts `npm run worker:control-plane`. A healthy heartbeat appears in the dashboard within approximately 30 seconds. Paper promotion and paper entries fail closed without it.
+
+## Operating sequence
+
+1. Keep the stage at **Research** while the research workflow generates purged horizon models.
+2. When the latest run recommends `shadow`, select **Shadow**. The settings API rejects promotion if validation did not pass.
+3. Shadow entries, marks, exits, MAE/MFE, and realized P&L now use the same adverse executable quotes and exit policy as paper.
+4. Paper promotion is rejected until the configured number of closed shadow trades has positive expectancy, positive total P&L, and acceptable drawdown.
+5. Run the GitHub agent workflow once and require a fresh, healthy Alpaca CLI oracle for the same attested paper account.
+6. Select **Paper**, then arm **New paper entries**. The API also requires a matching competition attestation and healthy Railway heartbeat. Existing positions are supervised regardless of this switch.
+7. The competition deadline guard blocks late entries and forces all positions closed at `COMPETITION_EXIT_AT`.
+
+The system does not automatically arm paper capital. Once a stage is authorized, opportunity discovery, decision making, submission, repricing, position management, exit, and reconciliation are autonomous.
+
+## Research and valuation
+
+1. Three years of Alpaca daily bars feed 3, 5, 10, 15, 20, and 25 trading-day models.
+2. Each validation fold purges every training label that overlaps the test window and adds a horizon-scaled embargo.
+3. Volatility MAE must beat a recent-volatility baseline; directional Brier score must beat the recent directional base rate.
+4. Current probabilities are shrunk toward 50% according to out-of-sample Brier skill. There is no minimum probability floor.
+5. Option DTE is converted to a matching trading-day forecast horizon.
+6. IV is fitted across moneyness, curvature, tenor, and moneyness-tenor interaction with liquidity weighting and Huber robustness.
+7. Every vertical is valued over a planned holding horizon. Black-Scholes is used only for theoretical changes, anchored to the observed spread midpoint so model level error cannot create instant alpha.
+8. Base and adverse cases include bid/ask friction, fat-tail volatility regimes, IV-convergence assumptions, P&L percentiles, probability of profit, and 95% CVaR.
+9. Fractional Kelly is optimized from the full P&L distribution and hard-capped by the constitution. Defined-loss portfolio limits remain authoritative.
+
+## Execution and emergency behavior
+
+- Entry starts near midpoint and advances toward a model-approved maximum debit; it never chases beyond the EV cap.
+- Exit starts near midpoint and advances toward the natural executable credit.
+- Every broker POST stores its client order ID before transmission. If the acknowledgement is lost, VolForge queries Alpaca by that ID and suppresses all duplicate submissions until the ambiguity resolves.
+- Alpaca REST reconciliation is authoritative even when the trade stream misses an event.
+- Partial fills, cancel-pending states, retries, expiration, rejection, mismatch, and reconciliation errors have explicit states.
+- Option-chain pagination must complete or the scan fails closed.
+- Indicative-feed decisions carry feed provenance and conservative friction. OPRA is preferred when available.
+- Issuer and macro news are paginated and independently classified. An unavailable news feed vetoes new entries.
+- Turning off new entries never disables exits.
+- Emergency mode blocks entries, cancels working orders, closes tracked spreads, cleans up orphan option legs, reconciles flatness, and only then suspends the broker.
+
+## Verification
+
+```text
+npm run typecheck
+npm test
+npm audit --audit-level=high
+npm run build
+```
+
+CI executes the same sequence. Quantitative, leakage, infrastructure, and safety invariants live under `tests/`.
+
+## Competition account
+
+The final submission must use a brand-new Alpaca paper account starting at exactly $100,000. Before any competition trade, run the **VolForge competition account attestation** workflow manually. It records:
+
+- Paper endpoint
+- Observed $100,000 equity
+- Zero prior positions
+- Zero prior orders
+- Active status
+- Options Level 3
+- Account fingerprint and API limitation statement
+
+The API preflight cannot independently prove when Alpaca created the account. Final eligibility remains Alpaca and judge authority.
+
+After attestation, run **VolForge autonomous options agent** once. Its pinned Alpaca CLI records an independent paper-account, market-clock, and CLI-version oracle in Supabase. Paper promotion and entry require that proof to be fresh and matched to the connected account.
+
+## Submission assets
+
+- [`docs/ONE_PAGE_WRITEUP.md`](docs/ONE_PAGE_WRITEUP.md)
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- [`docs/OPERATOR_RUNBOOK.md`](docs/OPERATOR_RUNBOOK.md)
+- [`docs/DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md)
+- [`docs/JUDGE_QA.md`](docs/JUDGE_QA.md)
+- [`docs/SUBMISSION_CHECKLIST.md`](docs/SUBMISSION_CHECKLIST.md)
+
+## Paper-trading limitation
+
+Alpaca paper trading does not reproduce market impact, queue priority, all latency slippage, or every price-improvement behavior. VolForge records implementation shortfall and adds conservative quote friction, but paper P&L is evidence of system behavior, not a guarantee of live performance.
+
+Licensed under MIT. This is paper-trading software, not financial advice.

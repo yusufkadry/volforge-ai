@@ -5,7 +5,7 @@ const openPaths = ["/login", "/api/auth/login"];
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
-  if (openPaths.some((path) => pathname.startsWith(path))) return NextResponse.next();
+  if (openPaths.some((path) => pathname === path || pathname.startsWith(`${path}/`))) return NextResponse.next();
 
   const valid = await isValidSession(request.cookies.get(SESSION_COOKIE)?.value, process.env.AUTH_SECRET);
   if (valid) return NextResponse.next();

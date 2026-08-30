@@ -1,14 +1,11 @@
+import { randomUUID } from "crypto";
 import WebSocket, { type RawData } from "ws";
 import { decode } from "@msgpack/msgpack";
+import { orderEventKey } from "../lib/execution-ledger";
+import { reconcileExecution } from "../lib/execution-reconciler";
 import { journal } from "../lib/supabase";
 
 const endpoint = process.env.ALPACA_TRADE_STREAM_URL ?? "wss://paper-api.alpaca.markets/stream";
-const key = process.env.ALPACA_API_KEY;
-const secret = process.env.ALPACA_SECRET_KEY;
-
-if (!key || !secret) throw new Error("ALPACA_API_KEY and ALPACA_SECRET_KEY are required for the trade stream worker.");
-
-function number(value: unknown) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : 0; }
 
 function decodeMessage(raw: RawData, isBinary: boolean) {
   if (!isBinary) return JSON.parse(raw.toString()) as { stream?: string; data?: Record<string, unknown> };
@@ -16,45 +13,91 @@ function decodeMessage(raw: RawData, isBinary: boolean) {
   return decode(payload) as { stream?: string; data?: Record<string, unknown> };
 }
 
-async function reconcileIntent(orderId: string, eventType: string, filledPrice: number) {
-  const entryIntent = await journal.intentByEntryOrder(orderId);
-  const exitIntent = entryIntent ? null : await journal.intentByExitOrder(orderId);
-  const intent = entryIntent ?? exitIntent;
-  if (!intent?.id) return;
-  if (entryIntent) {
-    if (eventType === "fill") await journal.updateIntent(intent.id, { status: "open", entry_debit: filledPrice > 0 ? filledPrice : intent.entry_debit, current_debit: filledPrice > 0 ? filledPrice : intent.current_debit });
-    if (["canceled", "rejected", "expired"].includes(eventType)) await journal.updateIntent(intent.id, { status: eventType === "canceled" ? "canceled" : "error" });
-    return;
+export function startTradeStream(instanceId: string = randomUUID()) {
+  const key = process.env.ALPACA_API_KEY;
+  const secret = process.env.ALPACA_SECRET_KEY;
+  if (!key || !secret) throw new Error("ALPACA_API_KEY and ALPACA_SECRET_KEY are required for the trade stream worker.");
+  let socket: WebSocket | null = null;
+  let stopped = false;
+  let authenticated = false;
+  let reconnectAttempt = 0;
+  let lastEventAt: string | null = null;
+
+  async function heartbeat(status: "healthy" | "degraded" | "stopped", details: Record<string, unknown> = {}) {
+    await journal.heartbeat({ service: "execution-control-plane", instance_id: instanceId, status, last_seen_at: new Date().toISOString(), details: { stream_authenticated: authenticated, last_event_at: lastEventAt, endpoint, reconnect_attempt: reconnectAttempt, ...details } });
   }
-  if (eventType === "fill") await journal.updateIntent(intent.id, { status: "closed", current_debit: filledPrice > 0 ? filledPrice : intent.current_debit });
-  if (["canceled", "rejected", "expired"].includes(eventType)) await journal.updateIntent(intent.id, { status: "open" });
-}
 
-function connect() {
-  const socket = new WebSocket(endpoint);
-  socket.on("open", () => socket.send(JSON.stringify({ action: "auth", key, secret })));
-  socket.on("message", async (raw, isBinary) => {
-    try {
-      const message = decodeMessage(raw, isBinary);
-      if (message.stream === "authorization" && message.data?.status === "authorized") {
-        socket.send(JSON.stringify({ action: "listen", data: { streams: ["trade_updates"] } }));
-        return;
+  function connect() {
+    if (stopped) return;
+    socket = new WebSocket(endpoint);
+    socket.on("open", () => socket?.send(JSON.stringify({ action: "auth", key, secret })));
+    socket.on("message", async (raw, isBinary) => {
+      try {
+        const message = decodeMessage(raw, isBinary);
+        if (message.stream === "authorization") {
+          authenticated = message.data?.status === "authorized";
+          if (!authenticated) throw new Error(`Alpaca stream authorization failed: ${JSON.stringify(message.data ?? {})}`);
+          reconnectAttempt = 0;
+          socket?.send(JSON.stringify({ action: "listen", data: { streams: ["trade_updates"] } }));
+          await heartbeat("healthy", { event: "authorized" });
+          return;
+        }
+        if (message.stream !== "trade_updates") return;
+        lastEventAt = new Date().toISOString();
+        const order = message.data?.order as Record<string, unknown> | undefined;
+        const orderId = String(order?.id ?? "");
+        const eventType = String(message.data?.event ?? "trade_update");
+        const timestamp = String(message.data?.timestamp ?? order?.updated_at ?? lastEventAt);
+        await journal.writeOrderEvent({
+          alpaca_order_id: orderId,
+          client_order_id: String(order?.client_order_id ?? ""),
+          event_key: orderEventKey(orderId, eventType, timestamp, order?.filled_qty),
+          event_type: eventType,
+          payload: message.data ?? {},
+        });
+        let reconciliation = "not_required";
+        if (orderId) {
+          const owner = `stream:${instanceId}:${orderId}:${timestamp}`;
+          const acquired = await journal.acquireLease("volforge-capital-loop", owner, 120);
+          if (acquired) {
+            try {
+              const settings = await journal.settings();
+              await reconcileExecution({ entriesAllowed: settings.promotion_stage === "paper" && settings.trading_enabled && !settings.emergency_stop });
+              reconciliation = "completed";
+            } finally {
+              await journal.releaseLease("volforge-capital-loop", owner).catch(() => false);
+            }
+          } else reconciliation = "deferred_to_rest_loop";
+        }
+        await heartbeat("healthy", { event: eventType, order_id: orderId, reconciliation });
+      } catch (error) {
+        console.error("Trade-stream event failed", error);
+        await heartbeat("degraded", { error: error instanceof Error ? error.message : "unknown stream event error" }).catch(() => undefined);
       }
-      if (message.stream !== "trade_updates") return;
-      const order = message.data?.order as Record<string, unknown> | undefined;
-      const orderId = String(order?.id ?? "");
-      const eventType = String(message.data?.event ?? "trade_update");
-      await journal.writeOrderEvent({
-        alpaca_order_id: orderId,
-        client_order_id: String(order?.client_order_id ?? ""),
-        event_type: eventType,
-        payload: message.data ?? {},
-      });
-      if (orderId) await reconcileIntent(orderId, eventType, number(order?.filled_avg_price));
-    } catch (error) { console.error("Trade-stream event failed", error); }
-  });
-  socket.on("close", () => setTimeout(connect, 3_000));
-  socket.on("error", (error) => console.error("Trade-stream connection error", error.message));
+    });
+    socket.on("close", async () => {
+      authenticated = false;
+      reconnectAttempt += 1;
+      await heartbeat(stopped ? "stopped" : "degraded", { event: "closed" }).catch(() => undefined);
+      if (!stopped) setTimeout(connect, Math.min(30_000, 1_000 * 2 ** Math.min(reconnectAttempt, 5)));
+    });
+    socket.on("error", async (error) => {
+      console.error("Trade-stream connection error", error.message);
+      await heartbeat("degraded", { error: error.message }).catch(() => undefined);
+    });
+  }
+
+  const heartbeatTimer = setInterval(() => void heartbeat(authenticated ? "healthy" : "degraded"), 30_000);
+  connect();
+  return {
+    instanceId,
+    stop: async () => {
+      stopped = true;
+      clearInterval(heartbeatTimer);
+      socket?.close();
+      await heartbeat("stopped");
+    },
+  };
 }
 
-connect();
+if (process.argv[1]?.endsWith("trade-stream.ts")) startTradeStream();
