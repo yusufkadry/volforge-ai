@@ -1,24 +1,32 @@
-name: VolForge weekend research factory
+name: VolForge autonomous research factory
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */4 * * 0,6"
+    # Offset from the top of the hour to reduce GitHub schedule congestion.
+    - cron: "17 */4 * * *"
+    # Fresh research shortly before the regular US session, with DST-safe market gating downstream.
+    - cron: "45 12 * * 1-5"
 
 permissions:
   contents: read
 
+concurrency:
+  group: volforge-research-factory
+  cancel-in-progress: true
+
 jobs:
   research-only:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install
-      - run: npx tsx scripts/run-research-factory.ts
+          cache: npm
+      - run: npm ci
+      - run: npm run research:run
         env:
           ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
           ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
