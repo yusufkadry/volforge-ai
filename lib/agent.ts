@@ -113,7 +113,10 @@ async function runLeasedAgent(source: "scheduled" | "manual", trace_id: string, 
   const forecasts = forecastsFromRun(latestResearch);
   const researchBySymbol = new Map(forecasts.map((forecast) => [forecast.symbol, forecast]));
   if (!latestResearch || !forecasts.length) {
-    return write({ source, underlying: "RESEARCH", option_symbol: null, side: null, score: null, implied_volatility: null, expected_move: null, status: "ERROR", rationale: "No persisted research forecast is available. The dedicated research workflow must complete before market evaluation.", risk_gates: [{ name: "Research availability", passed: false, detail: "No versioned forecast manifest found" }], trace_id, strategy_version: STRATEGY_VERSION, raw: { constitution_hash: constitutionHash(), reconciliation, position_actions: positionActions, shadow_actions: shadowActions } });
+    const rationale = latestResearch
+      ? "The latest persisted research run uses a legacy or incomplete forecast schema. Run the autonomous research factory once with this release before market evaluation."
+      : "No persisted research forecast is available. The dedicated research workflow must complete before market evaluation.";
+    return write({ source, underlying: "RESEARCH", option_symbol: null, side: null, score: null, implied_volatility: null, expected_move: null, status: "ERROR", rationale, risk_gates: [{ name: "Research availability", passed: false, detail: latestResearch ? "Latest run has no valid horizon manifests" : "No versioned forecast manifest found" }], trace_id, strategy_version: STRATEGY_VERSION, raw: { constitution_hash: constitutionHash(), research_trace_id: latestResearch?.trace_id ?? null, reconciliation, position_actions: positionActions, shadow_actions: shadowActions } });
   }
 
   const symbols = universe();

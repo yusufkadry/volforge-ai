@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { samplesFromBars, walkForward, type Bar } from "../lib/research";
+import { forecastForTradingDays, forecastsFromRun, samplesFromBars, walkForward, type Bar } from "../lib/research";
+import type { ResearchForecast, ResearchRun } from "../lib/types";
 
 function syntheticBars(length = 760): Bar[] {
   let close = 100;
@@ -29,4 +30,11 @@ test("forward labels carry explicit end indices for leakage audits", () => {
   const samples = samplesFromBars(syntheticBars(300), horizon);
   assert.ok(samples.length > 100);
   for (const sample of samples.slice(0, 30)) assert.equal(sample.labelEndIndex - sample.asOfIndex + 1, horizon);
+});
+
+test("legacy research rows without horizon manifests fail closed", () => {
+  const legacyForecast = { symbol: "NVDA", forecastRv: 0.38, probabilityUp: 0.59, validation: { directionAccuracy: 0.55 } };
+  const run = { report: { forecasts: [legacyForecast] } } as unknown as ResearchRun;
+  assert.deepEqual(forecastsFromRun(run), []);
+  assert.equal(forecastForTradingDays(legacyForecast as unknown as ResearchForecast, 20), undefined);
 });

@@ -216,7 +216,10 @@ function configuredHorizons() {
 }
 
 export function forecastForTradingDays(forecast: ResearchForecast, horizonTradingDays: number) {
-  return [...forecast.horizons].sort((left, right) => Math.abs(left.horizonTradingDays - horizonTradingDays) - Math.abs(right.horizonTradingDays - horizonTradingDays))[0];
+  if (!Array.isArray(forecast?.horizons)) return undefined;
+  return forecast.horizons
+    .filter((horizon) => horizon && Number.isFinite(horizon.horizonTradingDays))
+    .sort((left, right) => Math.abs(left.horizonTradingDays - horizonTradingDays) - Math.abs(right.horizonTradingDays - horizonTradingDays))[0];
 }
 
 export function forecastForDte(forecast: ResearchForecast, calendarDte: number) {
@@ -229,9 +232,24 @@ export function researchForecastPassed(forecast: ResearchForecast) {
   return Boolean(optionHorizon && holdingHorizon && validationPassed(optionHorizon.validation) && validationPassed(holdingHorizon.validation));
 }
 
+function isResearchForecast(value: unknown): value is ResearchForecast {
+  if (!value || typeof value !== "object") return false;
+  const forecast = value as Partial<ResearchForecast>;
+  return typeof forecast.symbol === "string"
+    && typeof forecast.generatedAt === "string"
+    && Array.isArray(forecast.horizons)
+    && forecast.horizons.length > 0
+    && forecast.horizons.every((horizon) => horizon
+      && Number.isFinite(horizon.horizonTradingDays)
+      && Number.isFinite(horizon.forecastRv)
+      && Number.isFinite(horizon.probabilityUp)
+      && Boolean(horizon.validation)
+      && Boolean(horizon.manifest?.manifestHash));
+}
+
 export function forecastsFromRun(run: ResearchRun | null | undefined): ResearchForecast[] {
   if (!run || !run.report || !Array.isArray(run.report.forecasts)) return [];
-  return run.report.forecasts as ResearchForecast[];
+  return run.report.forecasts.filter(isResearchForecast);
 }
 
 export async function runResearch(): Promise<{ run: ResearchRun; forecasts: ResearchForecast[] }> {
