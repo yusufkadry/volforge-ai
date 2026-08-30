@@ -3,35 +3,58 @@ name: VolForge autonomous options agent
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 12-22 * * 1-5"
+    # Alpaca's market clock is the final authority. This wide window covers US DST changes.
+    # Railway is the five-minute primary loop; this is the independent recovery watchdog.
+    - cron: "7-59/15 12-22 * * 1-5"
 
 permissions:
   contents: read
 
+concurrency:
+  group: volforge-capital-loop
+  cancel-in-progress: false
+
 jobs:
   scan-and-trade:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
       - uses: actions/setup-go@v5
         with:
-          go-version: "stable"
+          go-version: "1.24.x"
       - name: Install Alpaca CLI
         run: |
-          go install github.com/alpacahq/cli/cmd/alpaca@latest
+          go install github.com/alpacahq/cli/cmd/alpaca@v0.0.13
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
       - name: Alpaca CLI paper preflight
         run: |
-          alpaca clock --quiet > /dev/null
-          alpaca account get --quiet > /dev/null
+          mkdir -p evidence
+          alpaca version > evidence/alpaca-cli-version.txt
+          alpaca clock --quiet > evidence/alpaca-clock.json
+          alpaca account get --quiet > evidence/alpaca-account.json
         env:
           ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
           ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
-      - run: npm install
+          ALPACA_LIVE_TRADE: "false"
+      - name: Upload Alpaca CLI evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpaca-cli-preflight-${{ github.run_id }}
+          path: evidence/
+          retention-days: 7
+      - run: npm ci
+      - name: Publish independent Alpaca CLI oracle
+        run: npm run cli:record
+        env:
+          ALPACA_LIVE_TRADE: "false"
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
       - run: npm run agent:run
         env:
           ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
