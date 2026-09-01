@@ -33,7 +33,7 @@ export const journal = {
   decisions: () => request<Decision[]>("/agent_decisions?select=*&order=created_at.desc&limit=24"),
   decisionCount: () => count("/agent_decisions?select=id&limit=1"),
   submittedDecisionCount: () => count("/agent_decisions?status=eq.SUBMITTED&select=id&limit=1"),
-  latestMarketDecision: async () => (await request<Decision[]>("/agent_decisions?option_symbol=not.is.null&select=*&order=created_at.desc&limit=1"))[0] ?? null,
+  latestMarketDecision: async () => (await request<Decision[]>("/agent_decisions?source=in.(scheduled,manual)&select=*&order=created_at.desc&limit=1"))[0] ?? null,
   latestResearchDecision: async () => (await request<Decision[]>("/agent_decisions?source=in.(autonomous_research_factory,weekend_research_factory)&select=*&order=created_at.desc&limit=1"))[0] ?? null,
   decisionByTrace: (traceId: string) => request<Decision[]>(`/agent_decisions?trace_id=eq.${encodeURIComponent(traceId)}&select=*`),
   writeDecision: (decision: Decision) => request<Decision[]>("/agent_decisions", {

@@ -6,14 +6,15 @@ import type { AgentSettings, RiskGate } from "@/lib/types";
 function number(value: unknown) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : 0; }
 
 export async function createRiskSnapshot(traceId: string, settings: AgentSettings) {
-  const [account, positions, intents] = await Promise.all([alpaca.account(), alpaca.positions(), journal.activeIntents()]);
+  const [account, positions, intents, shadowPositions] = await Promise.all([alpaca.account(), alpaca.positions(), journal.activeIntents(), journal.activeShadowPositions()]);
   const equity = number(account.equity);
   const priorClose = number(account.last_equity);
   const dailyPnl = priorClose > 0 ? equity - priorClose : 0;
   const optionPositions = positions.filter((position) => String(position.asset_class) === "us_option");
   const trackedSymbols = new Set(intents.flatMap((intent) => [intent.long_leg, intent.short_leg]));
   const orphanPositions = optionPositions.filter((position) => !trackedSymbols.has(String(position.symbol)));
-  const structureRisk = intents.reduce((total, intent) => total + Math.max(0, number(intent.max_loss)), 0);
+  const shadowRisk = settings.promotion_stage === "shadow" ? shadowPositions.reduce((total, position) => total + Math.max(0, number(position.max_loss)), 0) : 0;
+  const structureRisk = intents.reduce((total, intent) => total + Math.max(0, number(intent.max_loss)), 0) + shadowRisk;
   const orphanRisk = orphanPositions.reduce((total, position) => {
     const quantity = number(position.qty);
     // An untracked short option is treated as an account-level emergency, not as its mark value.
@@ -21,7 +22,7 @@ export async function createRiskSnapshot(traceId: string, settings: AgentSetting
   }, 0);
   const premiumAtRisk = structureRisk + orphanRisk;
   const orphanUnderlyings = new Set(orphanPositions.map((position) => String(position.symbol).match(/^([A-Z.]+)\d{6}[CP]/)?.[1] ?? String(position.symbol)));
-  const openPositions = intents.length + orphanUnderlyings.size;
+  const openPositions = intents.length + (settings.promotion_stage === "shadow" ? shadowPositions.length : 0) + orphanUnderlyings.size;
   const snapshot = {
     trace_id: traceId,
     account_equity: equity,
@@ -31,6 +32,7 @@ export async function createRiskSnapshot(traceId: string, settings: AgentSetting
     exposure: {
       accounting: "tracked defined loss plus conservative orphan risk; broker legs are reconciled by symbol",
       structures: intents.map((intent) => ({ underlying: intent.underlying, long_leg: intent.long_leg, short_leg: intent.short_leg, status: intent.status, max_loss: intent.max_loss, current_debit: intent.current_debit })),
+      shadow_structures: settings.promotion_stage === "shadow" ? shadowPositions.map((position) => ({ underlying: position.underlying, long_leg: position.long_leg, short_leg: position.short_leg, status: position.status, max_loss: position.max_loss, current_price: position.current_price })) : [],
       orphan_positions: orphanPositions.map((position) => ({ symbol: position.symbol, market_value: number(position.market_value), unrealized_pl: number(position.unrealized_pl), qty: position.qty })),
       broker_positions: Object.fromEntries(optionPositions.map((position) => [String(position.symbol), { market_value: number(position.market_value), unrealized_pl: number(position.unrealized_pl), qty: position.qty }])),
     },

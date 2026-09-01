@@ -10,13 +10,15 @@ export function conveneCourt(candidate: Candidate, forecast: ResearchForecast | 
   const opinions: CourtOpinion[] = [
     {
       agent: "Surface",
-      vote: candidate.surface.relativeResidual <= -numberEnv("MIN_IV_DISCOUNT", 0.03) && candidate.surface.residualZScore <= -numberEnv("MIN_SURFACE_Z_SCORE", 1) ? "approve" : "reject",
-      rationale: `${(candidate.surface.relativeResidual * 100).toFixed(1)}% residual versus robust moneyness-tenor fit; z ${candidate.surface.residualZScore.toFixed(2)} across ${candidate.surface.neighborCount} local peers.`,
+      vote: plan?.alphaSource === "surface-value" ? "approve" : plan?.alphaSource === "directional-distribution" ? "abstain" : "reject",
+      rationale: plan?.alphaSource === "directional-distribution"
+        ? `Directional alpha route accepted price discipline at ${(candidate.surface.relativeResidual * 100).toFixed(1)}% residual; surface engine abstains rather than fabricating a volatility anomaly.`
+        : `${(candidate.surface.relativeResidual * 100).toFixed(1)}% residual versus robust moneyness-tenor fit; z ${candidate.surface.residualZScore.toFixed(2)} across ${candidate.surface.neighborCount} local peers.`,
     },
     {
       agent: "Regime",
       vote: plan && plan.forecastEdge >= numberEnv("MIN_FORECAST_EDGE", 0.02) ? "approve" : "reject",
-      rationale: plan ? `${plan.valuationHorizonDays}-day horizon-matched RV edge ${(plan.forecastEdge * 100).toFixed(1)} points; purged volatility and Brier baselines passed.` : `No horizon-matched validated distribution for ${candidate.dte} calendar DTE.`,
+      rationale: plan ? `${plan.holdingHorizonDays}-day direction and ${plan.valuationHorizonDays}-day volatility distributions passed purged baselines; ${plan.alphaRationale}.` : `No validated dual-alpha structure survived for ${candidate.dte} calendar DTE.`,
     },
     {
       agent: "Execution",

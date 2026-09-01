@@ -10,8 +10,8 @@ import { conveneCourt } from "@/lib/model-court";
 import { AmbiguousOrderSubmissionError, submitOrderRecoverably } from "@/lib/order-submission";
 import { managePositions } from "@/lib/position-manager";
 import { governPortfolio } from "@/lib/portfolio-governor";
-import { forecastsFromRun, forecastForDte, forecastForTradingDays, researchForecastPassed, validationPassed } from "@/lib/research";
-import { rankTradePlans, rewardPlanFailure } from "@/lib/reward-engine";
+import { forecastsFromRun, forecastForDte, forecastForTradingDays, holdingDirection, researchForecastPassed, validationPassed } from "@/lib/research";
+import { analyzeTradePlans, candidatesWithoutActiveExposure, rewardPlanFailure } from "@/lib/reward-engine";
 import { createRiskSnapshot, portfolioGates } from "@/lib/risk-book";
 import { manageShadowPositions, reserveShadowPosition, shadowPromotionEvidence } from "@/lib/shadow-manager";
 import { composeStructure } from "@/lib/structure-composer";
@@ -124,10 +124,9 @@ async function runLeasedAgent(source: "scheduled" | "manual", trace_id: string, 
     const forecast = researchBySymbol.get(symbol);
     const executionStage = settings.promotion_stage === "shadow" || settings.promotion_stage === "paper";
     if (!forecast || (executionStage && !researchForecastPassed(forecast))) return [];
-    const conviction = Math.abs(forecast.probabilityUp - 0.5);
-    if (conviction < numberEnv("MIN_DIRECTIONAL_CONVICTION", 0.015)) return [];
-    const type: "call" | "put" = forecast.probabilityUp > 0.5 ? "call" : "put";
-    return scanSurface(symbol, type);
+    const direction = holdingDirection(forecast);
+    if (!direction || direction.conviction < numberEnv("MIN_DIRECTIONAL_CONVICTION", 0.015)) return [];
+    return scanSurface(symbol, direction.contractType);
   }));
   const scanErrors = scans.flatMap((result, index) => result.status === "rejected" ? [`${symbols[index]}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`] : []);
   const allCandidates = scans.flatMap((result) => result.status === "fulfilled" ? result.value : []);
@@ -136,31 +135,40 @@ async function runLeasedAgent(source: "scheduled" | "manual", trace_id: string, 
     const leader = selectCandidate(candidates);
     return { trace_id, engine: "Surface", underlying: symbols[index], option_symbol: leader?.optionSymbol ?? null, payload: { contracts_seen: candidates.length, leader, complete: result.status === "fulfilled", scan_error: result.status === "rejected" ? String(result.reason) : null, research_trace_id: latestResearch.trace_id } };
   }));
-  const tradePlan = rankTradePlans(allCandidates, researchBySymbol, Number(account.equity ?? 0), settings.max_premium_per_trade)[0];
-  const candidate = tradePlan?.candidate ?? selectCandidate(allCandidates);
+  const [activeIntents, activeShadows] = await Promise.all([journal.activeIntents(), journal.activeShadowPositions()]);
+  const activeExposure = settings.promotion_stage === "shadow" ? activeShadows : activeIntents;
+  const blockedUnderlyings = new Set(activeExposure.map((position) => position.underlying));
+  const allocationCandidates = candidatesWithoutActiveExposure(allCandidates, blockedUnderlyings);
+  const blockedCandidateCount = allCandidates.length - allocationCandidates.length;
+  const allocationAnalysis = analyzeTradePlans(allocationCandidates, researchBySymbol, Number(account.equity ?? 0), settings.max_premium_per_trade);
+  const tradePlan = allocationAnalysis.plans[0];
+  const candidate = tradePlan?.candidate ?? selectCandidate(allocationCandidates) ?? selectCandidate(allCandidates);
+  const allocationFailure = blockedCandidateCount > 0 && !allocationCandidates.length
+    ? `${blockedCandidateCount} contracts were excluded because every qualified underlying already has active ${settings.promotion_stage} exposure.`
+    : rewardPlanFailure(allocationCandidates, researchBySymbol, Number(account.equity ?? 0), settings.max_premium_per_trade, allocationAnalysis.diagnostics);
 
   if (!candidate) {
     const reason = scanErrors.length === symbols.length
       ? `Every option-chain scan failed closed: ${scanErrors.join(" | ")}`
-      : `No complete option chain passed the model-directed scan. ${rewardPlanFailure(allCandidates, researchBySymbol, Number(account.equity ?? 0), settings.max_premium_per_trade)}`;
-    return write({ source, underlying: "MARKET", option_symbol: null, side: null, score: null, implied_volatility: null, expected_move: null, status: scanErrors.length === symbols.length ? "ERROR" : "SCANNED", rationale: reason, risk_gates: [{ name: "Research freshness", passed: researchFresh, detail: researchFresh ? `${Math.round(researchAgeMs / 60_000)} minutes old` : "Persisted research is stale" }], trace_id, strategy_version: STRATEGY_VERSION, raw: { constitution_hash: constitutionHash(), research_trace_id: latestResearch.trace_id, scan_errors: scanErrors, reconciliation, position_actions: positionActions, shadow_actions: shadowActions, allocation: { status: "unavailable", reason } } });
+      : `No complete option chain passed the model-directed scan. ${allocationFailure}`;
+    return write({ source, underlying: "MARKET", option_symbol: null, side: null, score: null, implied_volatility: null, expected_move: null, status: scanErrors.length === symbols.length ? "ERROR" : "SCANNED", rationale: reason, risk_gates: [{ name: "Research freshness", passed: researchFresh, detail: researchFresh ? `${Math.round(researchAgeMs / 60_000)} minutes old` : "Persisted research is stale" }], trace_id, strategy_version: STRATEGY_VERSION, raw: { constitution_hash: constitutionHash(), research_trace_id: latestResearch.trace_id, scan_errors: scanErrors, reconciliation, position_actions: positionActions, shadow_actions: shadowActions, allocation: { status: "unavailable", reason, funnel: allocationAnalysis.diagnostics, blocked_candidate_count: blockedCandidateCount, blocked_underlyings: [...blockedUnderlyings] } } });
   }
 
   const forecast = researchBySymbol.get(candidate.underlying);
   const optionForecast = forecast ? forecastForDte(forecast, candidate.dte) : undefined;
-  const activeIntent = await journal.activeIntentForUnderlying(candidate.underlying);
-  const activeShadow = await journal.activeShadowForUnderlying(candidate.underlying);
+  const activeIntent = activeIntents.find((intent) => intent.underlying === candidate.underlying) ?? null;
+  const activeShadow = activeShadows.find((position) => position.underlying === candidate.underlying) ?? null;
   const idempotencyKey = tradePlan ? executionKey(tradePlan) : null;
   const world = await assessWorldIntelligence(candidate);
-  const governor = tradePlan ? await governPortfolio(tradePlan, Number(account.equity ?? 0), clock.is_open) : null;
+  const governor = tradePlan ? await governPortfolio(tradePlan, Number(account.equity ?? 0), clock.is_open, settings.promotion_stage) : null;
   const calibration = await calibrate();
   const forecastEdge = tradePlan?.forecastEdge ?? (optionForecast?.forecastRv ?? 0) - candidate.impliedVolatility;
   const gates = riskGates(candidate, clock.is_open);
   gates.push(...portfolioGates(riskSnapshot));
   gates.push(...(governor?.gates ?? [{ name: "Portfolio governor", passed: false, detail: "No qualifying structure available for portfolio simulation" }]));
   gates.push({ name: "Research freshness", passed: researchFresh, detail: researchFresh ? `${Math.round(researchAgeMs / 60_000)} minutes old; trace ${latestResearch.trace_id.slice(0, 8)}` : `${Math.round(researchAgeMs / 3_600_000)} hours old; refresh required` });
-  gates.push({ name: "Surface residual", passed: candidate.surface.relativeResidual <= -numberEnv("MIN_IV_DISCOUNT", 0.03) && candidate.surface.residualZScore <= -numberEnv("MIN_SURFACE_Z_SCORE", 1), detail: `${(candidate.surface.relativeResidual * 100).toFixed(1)}% residual, z ${candidate.surface.residualZScore.toFixed(2)}` });
-  gates.push({ name: "Forecast edge", passed: forecastEdge >= numberEnv("MIN_FORECAST_EDGE", 0.02), detail: `Horizon RV ${((optionForecast?.forecastRv ?? 0) * 100).toFixed(1)}% vs observed IV ${(candidate.impliedVolatility * 100).toFixed(1)}%; edge ${(forecastEdge * 100).toFixed(1)} points` });
+  gates.push({ name: "Alpha thesis", passed: Boolean(tradePlan), detail: tradePlan ? `${tradePlan.alphaSource}: ${tradePlan.alphaRationale}` : allocationFailure });
+  gates.push({ name: "Horizon distribution", passed: Boolean(optionForecast && validationPassed(optionForecast.validation)), detail: optionForecast ? `${optionForecast.horizonTradingDays}-trading-day RV ${(optionForecast.forecastRv * 100).toFixed(1)}%; observed IV ${(candidate.impliedVolatility * 100).toFixed(1)}%; spread ${(forecastEdge * 100).toFixed(1)} points` : `No forecast matched ${candidate.dte} calendar DTE` });
   gates.push({ name: "Purged validation", passed: Boolean(forecast && researchForecastPassed(forecast)), detail: validationDetail(forecast, candidate.dte) });
   gates.push({ name: "Reward-to-risk", passed: Boolean(tradePlan && tradePlan.rewardRisk >= numberEnv("MIN_REWARD_RISK", 1.25)), detail: tradePlan ? `${tradePlan.rewardRisk.toFixed(2)}x maximum reward / approved maximum debit loss` : rewardPlanFailure(allCandidates, researchBySymbol, Number(account.equity ?? 0), settings.max_premium_per_trade) });
   gates.push({ name: "Distributional expected value", passed: Boolean(tradePlan && tradePlan.baseExpectedValue >= numberEnv("MIN_EXPECTED_VALUE", 8)), detail: tradePlan ? `$${tradePlan.baseExpectedValue.toFixed(2)} base mark-forward EV across ${tradePlan.valuation.scenarioCount} scenarios` : "No valid payoff integration" });
@@ -194,7 +202,7 @@ async function runLeasedAgent(source: "scheduled" | "manual", trace_id: string, 
     source, underlying: candidate.underlying, option_symbol: candidate.optionSymbol, side: "buy",
     score: candidate.surface.relativeResidual, implied_volatility: candidate.impliedVolatility,
     expected_move: optionForecast?.forecastRv ?? null, status: approved ? "APPROVED" : "REJECTED",
-    rationale: `${thesis(candidate)}${tradePlan ? ` Proposed ${candidate.contractType} debit spread: buy ${candidate.optionSymbol}, sell ${tradePlan.shortLeg.optionSymbol}; $${tradePlan.debit.toFixed(2)} initial limit, $${tradePlan.maxEntryDebit.toFixed(2)} absolute model-approved debit cap, $${tradePlan.maxLoss.toFixed(0)} maximum loss, $${tradePlan.maxReward.toFixed(0)} maximum reward, $${tradePlan.baseExpectedValue.toFixed(0)} base EV, and $${tradePlan.stressedExpectedValue.toFixed(0)} adverse-stress EV per spread.` : ""} ${criticResult.rationale}`,
+    rationale: `${thesis(candidate)}${tradePlan ? ` ${tradePlan.alphaSource} thesis: ${tradePlan.alphaRationale}. Proposed ${candidate.contractType} debit spread: buy ${candidate.optionSymbol}, sell ${tradePlan.shortLeg.optionSymbol}; $${tradePlan.debit.toFixed(2)} initial limit, $${tradePlan.maxEntryDebit.toFixed(2)} absolute model-approved debit cap, $${tradePlan.maxLoss.toFixed(0)} maximum loss, $${tradePlan.maxReward.toFixed(0)} maximum reward, $${tradePlan.baseExpectedValue.toFixed(0)} base EV, and $${tradePlan.stressedExpectedValue.toFixed(0)} adverse-stress EV per spread.` : ""} ${criticResult.rationale}`,
     risk_gates: gates,
     trace_id, strategy_version: STRATEGY_VERSION, model_score: optionForecast?.validation.brierSkill ?? null,
     data_freshness_ms: candidate.quoteTimestamp ? Math.max(0, Date.now() - new Date(candidate.quoteTimestamp).getTime()) : null,
@@ -203,14 +211,14 @@ async function runLeasedAgent(source: "scheduled" | "manual", trace_id: string, 
       forecast, selected_horizon: optionForecast, court: court.opinions, world, portfolio_governor: governor, calibration, shadow_evidence: shadowEvidence,
       execution_heartbeat: heartbeat, account_attestation: accountAttestation, cli_preflight: cliPreflight, reconciliation, risk_snapshot: riskSnapshot, position_actions: positionActions, shadow_actions: shadowActions, scan_errors: scanErrors,
       allocation: tradePlan ? {
-        status: "ranked", model: tradePlan.valuation.model, structure: `${candidate.contractType} debit spread`, short_leg: tradePlan.shortLeg.optionSymbol,
+        status: "ranked", model: tradePlan.valuation.model, alpha_source: tradePlan.alphaSource, alpha_rationale: tradePlan.alphaRationale, structure: `${candidate.contractType} debit spread`, short_leg: tradePlan.shortLeg.optionSymbol,
         initial_limit: tradePlan.debit, entry_mid: tradePlan.entryMid, natural_debit: tradePlan.naturalDebit, maximum_approved_debit: tradePlan.maxEntryDebit,
         max_loss: tradePlan.maxLoss, max_reward: tradePlan.maxReward, reward_risk: tradePlan.rewardRisk,
         payoff_probability: tradePlan.payoffProbability, base_expected_value: tradePlan.baseExpectedValue, stressed_expected_value: tradePlan.stressedExpectedValue,
         expected_value: tradePlan.expectedValue, kelly_fraction: tradePlan.kellyFraction, raw_kelly_fraction: tradePlan.rawKellyFraction,
         cvar_95: tradePlan.valuation.cvar95, pnl_percentiles: { p10: tradePlan.valuation.pnlP10, p50: tradePlan.valuation.pnlP50, p90: tradePlan.valuation.pnlP90 },
-        risk_budget: tradePlan.riskBudget, quantity: tradePlan.quantity, allocation_score: tradePlan.allocationScore, idempotency_key: idempotencyKey, assumptions: tradePlan.valuation.assumptions,
-      } : { status: "rejected", reason: rewardPlanFailure(allCandidates, researchBySymbol, Number(account.equity ?? 0), settings.max_premium_per_trade) },
+        risk_budget: tradePlan.riskBudget, quantity: tradePlan.quantity, allocation_score: tradePlan.allocationScore, idempotency_key: idempotencyKey, assumptions: tradePlan.valuation.assumptions, funnel: allocationAnalysis.diagnostics, blocked_candidate_count: blockedCandidateCount, blocked_underlyings: [...blockedUnderlyings],
+      } : { status: "rejected", reason: allocationFailure, funnel: allocationAnalysis.diagnostics, blocked_candidate_count: blockedCandidateCount, blocked_underlyings: [...blockedUnderlyings] },
     },
   };
 
@@ -252,7 +260,7 @@ async function runLeasedAgent(source: "scheduled" | "manual", trace_id: string, 
       underlying: candidate.underlying, contract_type: candidate.contractType, long_leg: candidate.optionSymbol, short_leg: tradePlan.shortLeg.optionSymbol, quantity: tradePlan.quantity, filled_quantity: 0,
       entry_debit: tradePlan.debit, entry_limit_price: tradePlan.debit, max_entry_debit: tradePlan.maxEntryDebit,
       max_loss: tradePlan.maxLoss * tradePlan.quantity, max_reward: tradePlan.maxReward * tradePlan.quantity, entry_attempts: 1, exit_attempts: 0,
-      metadata: { allocation_score: tradePlan.allocationScore, reward_risk: tradePlan.rewardRisk, expected_value: tradePlan.expectedValue, base_expected_value: tradePlan.baseExpectedValue, stressed_expected_value: tradePlan.stressedExpectedValue, payoff_probability: tradePlan.payoffProbability, cvar_95: tradePlan.valuation.cvar95, max_entry_debit: tradePlan.maxEntryDebit, model_manifest_hash: optionForecast?.manifest.manifestHash, valuation: tradePlan.valuation, arrival_quote: { mid: tradePlan.entryMid, natural: tradePlan.naturalDebit } },
+      metadata: { alpha_source: tradePlan.alphaSource, alpha_rationale: tradePlan.alphaRationale, allocation_score: tradePlan.allocationScore, reward_risk: tradePlan.rewardRisk, expected_value: tradePlan.expectedValue, base_expected_value: tradePlan.baseExpectedValue, stressed_expected_value: tradePlan.stressedExpectedValue, payoff_probability: tradePlan.payoffProbability, cvar_95: tradePlan.valuation.cvar95, max_entry_debit: tradePlan.maxEntryDebit, model_manifest_hash: optionForecast?.manifest.manifestHash, valuation: tradePlan.valuation, arrival_quote: { mid: tradePlan.entryMid, natural: tradePlan.naturalDebit } },
     });
     if (!reservation.created || !reservation.intent?.id) return write({ ...decision, status: "REJECTED", rationale: `${decision.rationale} Entry skipped: an execution intent with this idempotency key already exists.` });
     reservationId = reservation.intent.id;

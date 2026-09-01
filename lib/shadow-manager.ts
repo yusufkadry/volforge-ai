@@ -16,6 +16,15 @@ function holdingDays(position: ShadowPosition) {
   return Math.max(0, Math.floor((Date.now() - new Date(position.created_at ?? Date.now()).getTime()) / 86_400_000));
 }
 
+export function shadowAgeMinutes(position: Pick<ShadowPosition, "created_at">, now = new Date()) {
+  return Math.max(0, (now.getTime() - new Date(position.created_at ?? now).getTime()) / 60_000);
+}
+
+export function shadowEvaluationDue(position: Pick<ShadowPosition, "created_at">, now = new Date()) {
+  const windowMinutes = numberEnv("SHADOW_EVALUATION_MINUTES", 90);
+  return windowMinutes > 0 && shadowAgeMinutes(position, now) >= windowMinutes;
+}
+
 function daysToExpiry(symbol: string) {
   const match = symbol.match(/(\d{6})[CP]/);
   if (!match) return Number.POSITIVE_INFINITY;
@@ -28,12 +37,19 @@ export function shadowExecutionKey(plan: TradePlan, now = new Date()) {
 }
 
 export async function reserveShadowPosition(plan: TradePlan, traceId: string, rationale: string) {
-  const duplicate = await journal.activeShadowForUnderlying(plan.candidate.underlying);
+  const [duplicate, active, settings] = await Promise.all([
+    journal.activeShadowForUnderlying(plan.candidate.underlying), journal.activeShadowPositions(), journal.settings(),
+  ]);
   if (duplicate) return { created: false, reason: `Active shadow exposure already exists on ${duplicate.underlying}.`, position: duplicate };
+  if (active.length >= settings.max_open_positions) return { created: false, reason: `Shadow portfolio already holds its ${settings.max_open_positions}-position limit.`, position: null };
   const quotes = await spreadQuotes(plan.candidate.underlying, plan.candidate.optionSymbol, plan.shortLeg.optionSymbol);
   if (!quotes || !quotes.fresh) return { created: false, reason: "Fresh executable spread quote unavailable for shadow reservation.", position: null };
   const entryPrice = quotes.entryNatural;
   if (entryPrice > plan.maxEntryDebit || entryPrice >= plan.width || entryPrice * 100 * plan.quantity > plan.riskBudget) return { created: false, reason: "Live adverse shadow entry exceeded the model-approved debit cap, width, or risk budget.", position: null };
+  const currentRisk = active.reduce((total, position) => total + Number(position.max_loss || 0), 0);
+  const proposedRisk = currentRisk + entryPrice * 100 * plan.quantity;
+  const portfolioCeiling = settings.max_premium_per_trade * settings.max_open_positions;
+  if (proposedRisk > portfolioCeiling) return { created: false, reason: `Shadow defined loss would exceed its $${portfolioCeiling.toFixed(0)} portfolio ceiling.`, position: null };
   const position: ShadowPosition = {
     trace_id: traceId,
     strategy_version: STRATEGY_VERSION,
@@ -55,7 +71,11 @@ export async function reserveShadowPosition(plan: TradePlan, traceId: string, ra
     max_adverse_excursion: Math.min(0, (quotes.closeNatural - entryPrice) * 100 * plan.quantity),
     max_favorable_excursion: Math.max(0, (quotes.closeNatural - entryPrice) * 100 * plan.quantity),
     last_mark_at: new Date().toISOString(),
-    metadata: { model_ev: plan.expectedValue, probability_profit: plan.payoffProbability, valuation: plan.valuation, entry_quote: quotes },
+    metadata: {
+      alpha_source: plan.alphaSource, alpha_rationale: plan.alphaRationale, model_ev: plan.expectedValue, probability_profit: plan.payoffProbability,
+      valuation: plan.valuation, entry_quote: quotes, evaluation_window_minutes: numberEnv("SHADOW_EVALUATION_MINUTES", 90),
+      validation_scope: "Adverse-quote execution and short-window directional calibration; not a substitute for the modeled strategy holding horizon.",
+    },
   };
   const reservation = await journal.reserveShadow(position);
   return { created: reservation.created, reason: reservation.created ? "Shadow position reserved." : "Identical shadow structure was already reserved today.", position: reservation.position };
@@ -82,6 +102,7 @@ export async function manageShadowPositions(marketOpen: boolean) {
       else if (returnPct >= CONSTITUTION.trading.takeProfitPct) exitReason = "take_profit";
       else if (returnPct <= -CONSTITUTION.trading.stopLossPct) exitReason = "stop_loss";
       else if (daysToExpiry(position.long_leg) <= 14) exitReason = "dte_exit";
+      else if (shadowEvaluationDue(position)) exitReason = "shadow_evaluation_window";
       else if (holdingDays(position) >= CONSTITUTION.trading.maxHoldingDays) exitReason = "time_exit";
       const update: Partial<ShadowPosition> = {
         current_price: quotes.closeNatural,

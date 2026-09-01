@@ -94,7 +94,7 @@ export default function DashboardClient() {
   const latest = data?.latestMarketDecision ?? null;
   const latestResearchDecision = data?.latestResearchDecision ?? null;
   const warnings = data?.errors ?? [];
-  const score = latest?.score ?? 0;
+  const score = latest?.score ?? null;
   const mode = data?.settings.emergency_stop ? "EMERGENCY LIQUIDATION" : data?.settings.promotion_stage === "shadow" ? "SHADOW PORTFOLIO" : data?.settings.trading_enabled ? "PAPER ENTRIES ARMED" : data?.settings.promotion_stage === "paper" ? "PAPER ENTRIES DISARMED" : "RESEARCH ONLY";
   const decisionCount = data?.decisionTotal ?? 0;
   const submitted = data?.submittedDecisionTotal ?? 0;
@@ -108,8 +108,9 @@ export default function DashboardClient() {
   const court = (latest?.raw?.court as Array<{ agent: string; vote: string; rationale: string }> | undefined) ?? [];
   const evidenceHash = typeof latest?.raw?.evidence_hash === "string" ? latest.raw.evidence_hash : null;
   const allocation = latest?.raw?.allocation as {
-    status?: string; reason?: string; structure?: string; short_leg?: string; max_loss?: number; max_reward?: number;
+    status?: string; reason?: string; alpha_source?: string; alpha_rationale?: string; structure?: string; short_leg?: string; max_loss?: number; max_reward?: number;
     reward_risk?: number; expected_value?: number; base_expected_value?: number; stressed_expected_value?: number; payoff_probability?: number; kelly_fraction?: number; risk_budget?: number; quantity?: number; cvar_95?: number;
+    funnel?: { candidatesSeen?: number; executableLongLegs?: number; alphaQualified?: number; spreadsPriced?: number; valuationsRun?: number; plansRanked?: number };
   } | undefined;
   const allocationReady = allocation?.status === "ranked";
   const intents = data?.intents ?? [];
@@ -154,7 +155,7 @@ export default function DashboardClient() {
 
       <section className="dashboard-grid">
         <section className="panel surface-panel">
-          <div className="panel-heading"><div><p className="eyebrow">SURFACE ENGINE</p><h2>Moneyness-tenor IV residual</h2></div><span className="score-chip">{score ? `${(score * 100).toFixed(1)}%` : "Awaiting market scan"}</span></div>
+          <div className="panel-heading"><div><p className="eyebrow">SURFACE ENGINE</p><h2>Moneyness-tenor IV residual</h2></div><span className="score-chip">{score !== null ? `${(score * 100).toFixed(1)}%` : "Awaiting market scan"}</span></div>
           <SurfacePlot decisions={data?.decisions ?? []} />
           <div className="plot-labels"><span>IV premium</span><span>fitted surface</span><span>IV discount</span></div>
           <div className="thesis"><Sparkles size={18} /><p>{latest?.rationale ?? latestResearchDecision?.rationale ?? "The autonomous market loop has not published a candidate yet."}</p></div>
@@ -181,7 +182,7 @@ export default function DashboardClient() {
           <div><span>Base / stress EV</span><strong>{money.format(asNumber(allocation.base_expected_value) * asNumber(allocation.quantity))} / {money.format(asNumber(allocation.stressed_expected_value) * asNumber(allocation.quantity))}</strong><small>Mark-forward distribution</small></div>
           <div><span>Profit probability</span><strong>{(asNumber(allocation.payoff_probability) * 100).toFixed(0)}%</strong><small>No probability floor</small></div>
           <div><span>Fractional Kelly</span><strong>{(asNumber(allocation.kelly_fraction) * 100).toFixed(1)}%</strong><small>Hard-capped; CVaR {money.format(asNumber(allocation.cvar_95))}</small></div>
-        </div><p className="allocation-note">Long {latest?.option_symbol} / short {allocation.short_leg}. EV comes from calibrated return scenarios, option repricing, quote friction, and an adverse tail stress before deterministic capital gates run.</p></> : <p className="allocation-note muted">{allocation?.reason ?? "The payoff engine will publish an allocation after the next executable surface scan."}</p>}
+        </div><p className="allocation-note"><strong>{allocation.alpha_source?.replace("-", " ")}</strong>: {allocation.alpha_rationale}. Long {latest?.option_symbol} / short {allocation.short_leg}. EV comes from calibrated return scenarios, option repricing, quote friction, and an adverse tail stress before deterministic capital gates run.</p></> : <><p className="allocation-note muted">{allocation?.reason ?? "The payoff engine will publish an allocation after the next executable surface scan."}</p>{allocation?.funnel && <div className="allocation-grid"><div><span>Surface contracts</span><strong>{number.format(asNumber(allocation.funnel.candidatesSeen))}</strong><small>Economic fit universe</small></div><div><span>Executable longs</span><strong>{number.format(asNumber(allocation.funnel.executableLongLegs))}</strong><small>Fresh and liquid</small></div><div><span>Alpha-qualified</span><strong>{number.format(asNumber(allocation.funnel.alphaQualified))}</strong><small>Dual-alpha router</small></div><div><span>Priced verticals</span><strong>{number.format(asNumber(allocation.funnel.spreadsPriced))}</strong><small>Both legs executable</small></div><div><span>Stress valuations</span><strong>{number.format(asNumber(allocation.funnel.valuationsRun))}</strong><small>Distributional engine</small></div><div><span>Ranked plans</span><strong>{number.format(asNumber(allocation.funnel.plansRanked))}</strong><small>All hard gates passed</small></div></div>}</>}
       </section>
 
       <section className="panel ledger-panel">

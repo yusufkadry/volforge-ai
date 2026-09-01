@@ -4,7 +4,7 @@ import { competitionEntryAllowed } from "@/lib/competition";
 import { numberEnv } from "@/lib/env";
 import { journal } from "@/lib/supabase";
 import type { TradePlan } from "@/lib/reward-engine";
-import type { RiskGate } from "@/lib/types";
+import type { AgentSettings, RiskGate } from "@/lib/types";
 
 function number(value: unknown) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : 0; }
 function finite(value: unknown) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : null; }
@@ -15,10 +15,14 @@ function nyMinutes(now = new Date()) {
   return value("hour") * 60 + value("minute");
 }
 
-export async function governPortfolio(plan: TradePlan, equity: number, marketOpen: boolean) {
-  const [positions, intents] = await Promise.all([alpaca.positions(), journal.activeIntents()]);
+export async function governPortfolio(plan: TradePlan, equity: number, marketOpen: boolean, stage: AgentSettings["promotion_stage"] = "paper") {
+  const [positions, intents, shadowPositions] = await Promise.all([alpaca.positions(), journal.activeIntents(), journal.activeShadowPositions()]);
+  const activeShadows = stage === "shadow" ? shadowPositions : [];
   const optionPositions = positions.filter((position) => String(position.asset_class) === "us_option");
-  const positionSymbols = optionPositions.map((position) => String(position.symbol));
+  const positionSymbols = [...new Set([
+    ...optionPositions.map((position) => String(position.symbol)),
+    ...activeShadows.flatMap((position) => [position.long_leg, position.short_leg]),
+  ])];
   const snapshotResponse = positionSymbols.length ? await alpaca.optionSnapshots(positionSymbols) : { snapshots: {}, meta: { contracts: 0 } };
   const snapshotMap: Record<string, Record<string, unknown>> = snapshotResponse.snapshots;
   let delta = 0;
@@ -39,17 +43,34 @@ export async function governPortfolio(plan: TradePlan, equity: number, marketOpe
     delta += quantity * (legDelta ?? 0);
     vega += quantity * (legVega ?? 0);
   });
+  activeShadows.forEach((position) => {
+    const legs = [{ symbol: position.long_leg, sign: 1 }, { symbol: position.short_leg, sign: -1 }];
+    legs.forEach((leg) => {
+      const snapshot = snapshotMap[leg.symbol] ?? {};
+      const greeks = (snapshot.greeks ?? {}) as Record<string, unknown>;
+      const quote = (snapshot.latestQuote ?? snapshot.latest_quote ?? {}) as Record<string, unknown>;
+      const timestamp = String(quote.t ?? quote.timestamp ?? "");
+      const quoteAge = timestamp ? Date.now() - new Date(timestamp).getTime() : Number.POSITIVE_INFINITY;
+      const legDelta = finite(greeks.delta);
+      const legVega = finite(greeks.vega);
+      portfolioGreeksComplete = portfolioGreeksComplete && legDelta !== null && legVega !== null && quoteAge >= 0 && quoteAge <= numberEnv("MAX_DATA_AGE_MS", 120_000);
+      oldestQuoteAgeMs = Math.max(oldestQuoteAgeMs, quoteAge);
+      const quantity = number(position.quantity) * 100 * leg.sign;
+      delta += quantity * (legDelta ?? 0);
+      vega += quantity * (legVega ?? 0);
+    });
+  });
   const candidateGreeksComplete = [plan.candidate.delta, plan.candidate.vega, plan.shortLeg.delta, plan.shortLeg.vega].every((value) => finite(value) !== null);
   const candidateDelta = ((plan.candidate.delta ?? 0) - (plan.shortLeg.delta ?? 0)) * plan.quantity * 100;
   const candidateVega = ((plan.candidate.vega ?? 0) - (plan.shortLeg.vega ?? 0)) * plan.quantity * 100;
   const proposedDelta = delta + candidateDelta;
   const proposedVega = vega + candidateVega;
-  const currentRisk = intents.reduce((total, intent) => total + number(intent.max_loss), 0);
+  const currentRisk = intents.reduce((total, intent) => total + number(intent.max_loss), 0) + activeShadows.reduce((total, position) => total + number(position.max_loss), 0);
   const proposedRisk = currentRisk + plan.maxLoss * plan.quantity;
   const maxPortfolioRisk = equity * numberEnv("MAX_PORTFOLIO_RISK_PCT", 0.015);
   const sessionMinutes = nyMinutes();
   const inEntryWindow = marketOpen && sessionMinutes >= 9 * 60 + 35 && sessionMinutes < 15 * 60 + 30;
-  const duplicateUnderlying = intents.some((intent) => intent.underlying === plan.candidate.underlying);
+  const duplicateUnderlying = intents.some((intent) => intent.underlying === plan.candidate.underlying) || activeShadows.some((position) => position.underlying === plan.candidate.underlying);
   const gates: RiskGate[] = [
     { name: "Entry session window", passed: inEntryWindow, detail: inEntryWindow ? "After opening auction and before closing-liquidity window" : "Entry blocked during closed, opening, or late session window" },
     { name: "Competition entry window", passed: competitionEntryAllowed(), detail: competitionEntryAllowed() ? "Enough time remains before forced competition liquidation" : "Competition liquidation buffer has begun" },
@@ -60,6 +81,6 @@ export async function governPortfolio(plan: TradePlan, equity: number, marketOpe
     { name: "Net vega governor", passed: Math.abs(proposedVega) <= numberEnv("MAX_NET_VEGA", 300), detail: `${proposedVega.toFixed(0)} net vega-equivalent / ${numberEnv("MAX_NET_VEGA", 300).toFixed(0)} cap` },
     { name: "Loss-tail governor", passed: plan.valuation.cvar95 >= -plan.maxLoss, detail: `$${plan.valuation.cvar95.toFixed(0)} modeled 5% tail mean / -$${plan.maxLoss.toFixed(0)} defined-loss boundary` },
   ];
-  const payload = { existing_delta: delta, proposed_delta: proposedDelta, existing_vega: vega, proposed_vega: proposedVega, current_risk: currentRisk, proposed_risk: proposedRisk, max_portfolio_risk: maxPortfolioRisk, session_minutes: sessionMinutes, active_intents: intents.length, cvar95: plan.valuation.cvar95, gates };
+  const payload = { stage, existing_delta: delta, proposed_delta: proposedDelta, existing_vega: vega, proposed_vega: proposedVega, current_risk: currentRisk, proposed_risk: proposedRisk, max_portfolio_risk: maxPortfolioRisk, session_minutes: sessionMinutes, active_intents: intents.length, active_shadow_positions: activeShadows.length, cvar95: plan.valuation.cvar95, gates };
   return { gates, payload, evidenceHash: createHash("sha256").update(JSON.stringify(payload)).digest("hex") };
 }

@@ -57,6 +57,12 @@ test("manual scans use the durable Railway command queue", () => {
   assert.match(worker, /requeueControlRequest/);
 });
 
+test("dashboard surfaces the latest scheduled cycle even when no contract qualified", () => {
+  const database = readFileSync(new URL("../lib/supabase.ts", import.meta.url), "utf8");
+  assert.match(database, /source=in\.\(scheduled,manual\)/);
+  assert.doesNotMatch(database, /latestMarketDecision:[^\n]+option_symbol=not\.is\.null/);
+});
+
 test("paper authorization requires account attestation and a fresh CLI oracle", () => {
   const agent = readFileSync(new URL("../lib/agent.ts", import.meta.url), "utf8");
   const settings = readFileSync(new URL("../app/api/settings/route.ts", import.meta.url), "utf8");
@@ -102,9 +108,13 @@ test("operators can always disarm or downgrade without stale promotion proofs", 
 test("shadow fills and portfolio Greeks fail closed at executable evidence", () => {
   const shadow = readFileSync(new URL("../lib/shadow-manager.ts", import.meta.url), "utf8");
   const governor = readFileSync(new URL("../lib/portfolio-governor.ts", import.meta.url), "utf8");
+  const riskBook = readFileSync(new URL("../lib/risk-book.ts", import.meta.url), "utf8");
   assert.match(shadow, /entryPrice > plan\.maxEntryDebit/);
+  assert.match(shadow, /active\.length >= settings\.max_open_positions/);
   assert.match(governor, /Portfolio Greeks provenance/);
   assert.match(governor, /portfolioGreeksComplete && candidateGreeksComplete/);
+  assert.match(governor, /activeShadowPositions/);
+  assert.match(riskBook, /shadow_structures/);
 });
 
 test("dashboard password comparison uses fixed-length digests", async () => {

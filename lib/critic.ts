@@ -18,6 +18,7 @@ export async function critic(candidate: Candidate, plan?: TradePlan, world?: Wor
       relativeResidual: candidate.surface.relativeResidual, residualZScore: candidate.surface.residualZScore, surfaceNeighbors: candidate.surface.neighborCount,
       delta: candidate.delta, openInterest: candidate.openInterest, dataFeed: candidate.dataFeed,
       payoff: plan ? {
+        alphaSource: plan.alphaSource, alphaRationale: plan.alphaRationale,
         structure: `${candidate.contractType} debit spread`,
         longLeg: { symbol: candidate.optionSymbol, strike: candidate.strike, bid: candidate.bid, ask: candidate.ask },
         shortLeg: { symbol: plan.shortLeg.optionSymbol, strike: plan.shortLeg.strike, bid: plan.shortLeg.bid, ask: plan.shortLeg.ask },

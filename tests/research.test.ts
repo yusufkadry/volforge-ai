@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { forecastForTradingDays, forecastsFromRun, samplesFromBars, walkForward, type Bar } from "../lib/research";
+import { forecastForTradingDays, forecastsFromRun, holdingDirection, samplesFromBars, walkForward, type Bar } from "../lib/research";
+import { horizon } from "./fixtures";
 import type { ResearchForecast, ResearchRun } from "../lib/types";
 
 function syntheticBars(length = 760): Bar[] {
@@ -37,4 +38,16 @@ test("legacy research rows without horizon manifests fail closed", () => {
   const run = { report: { forecasts: [legacyForecast] } } as unknown as ResearchRun;
   assert.deepEqual(forecastsFromRun(run), []);
   assert.equal(forecastForTradingDays(legacyForecast as unknown as ResearchForecast, 20), undefined);
+});
+
+test("execution direction follows the validated holding horizon, not the representative option horizon", () => {
+  const holding = horizon(3, { probabilityUp: 0.42 });
+  const option = horizon(20, { probabilityUp: 0.71 });
+  const forecast = {
+    symbol: "SPY", generatedAt: new Date().toISOString(), horizons: [holding, option],
+    forecastRv: option.forecastRv, probabilityUp: option.probabilityUp, validation: option.validation, featureValues: [],
+  } satisfies ResearchForecast;
+  const direction = holdingDirection(forecast, 3);
+  assert.equal(direction?.contractType, "put");
+  assert.ok((direction?.conviction ?? 0) > 0.07);
 });

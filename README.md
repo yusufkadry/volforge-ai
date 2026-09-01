@@ -10,7 +10,8 @@ VolForge does not ask an LLM to invent a trade. Independent numerical engines pr
 
 | Engine | Authority |
 |---|---|
-| Surface | Fits robust IV against log-moneyness and tenor, then measures liquid local residuals and z-scores. |
+| Surface | Rejects non-economic chain artifacts, fits robust IV against log-moneyness and tenor, then measures liquid local residuals and z-scores. |
+| Dual-alpha router | Admits either a true surface-value dislocation or a calibrated holding-horizon directional thesis; both routes still face identical payoff and risk gates. |
 | Regime | Trains horizon-specific volatility and direction models with purged walk-forward validation and embargoes. |
 | Distribution | Integrates vertical-spread mark-forward P&L across calibrated base, fat-tail, and adverse stress scenarios. |
 | Event Intelligence | Deduplicates and scores source-qualified news by recency, event type, impact, and contradiction. It may veto only. |
@@ -101,7 +102,7 @@ Railway reads `railway.toml` and starts `npm run worker:control-plane`. A health
 
 1. Keep the stage at **Research** while the research workflow generates purged horizon models.
 2. When the latest run recommends `shadow`, select **Shadow**. The settings API rejects promotion if validation did not pass.
-3. Shadow entries, marks, exits, MAE/MFE, and realized P&L now use the same adverse executable quotes and exit policy as paper.
+3. Shadow entries, marks, exits, MAE/MFE, and realized P&L use adverse executable quotes. A configurable 90-minute shadow evaluation window collects multiple execution and short-window directional samples during the compressed competition timeline; records explicitly state that this is not a substitute for the modeled holding horizon.
 4. Paper promotion is rejected until the configured number of closed shadow trades has positive expectancy, positive total P&L, and acceptable drawdown.
 5. Run the GitHub agent workflow once and require a fresh, healthy Alpaca CLI oracle for the same attested paper account.
 6. Select **Paper**, then arm **New paper entries**. The API also requires a matching competition attestation and healthy Railway heartbeat. Existing positions are supervised regardless of this switch.
@@ -114,12 +115,13 @@ The system does not automatically arm paper capital. Once a stage is authorized,
 1. Three years of Alpaca daily bars feed 3, 5, 10, 15, 20, and 25 trading-day models.
 2. Each validation fold purges every training label that overlaps the test window and adds a horizon-scaled embargo.
 3. Volatility MAE must beat a recent-volatility baseline; directional Brier score must beat the recent directional base rate.
-4. Current probabilities are shrunk toward 50% according to out-of-sample Brier skill. There is no minimum probability floor.
+4. Current probabilities are shrunk toward 50% according to out-of-sample Brier skill. The validated holding horizon, rather than the representative option horizon, chooses call versus put exposure.
 5. Option DTE is converted to a matching trading-day forecast horizon.
-6. IV is fitted across moneyness, curvature, tenor, and moneyness-tenor interaction with liquidity weighting and Huber robustness.
+6. IV is fitted across moneyness, curvature, tenor, and moneyness-tenor interaction only after removing deep, penny-priced, wide, and low-interest artifacts, with liquidity weighting and Huber robustness.
 7. Every vertical is valued over a planned holding horizon. Black-Scholes is used only for theoretical changes, anchored to the observed spread midpoint so model level error cannot create instant alpha.
 8. Base and adverse cases include bid/ask friction, fat-tail volatility regimes, IV-convergence assumptions, P&L percentiles, probability of profit, and 95% CVaR.
 9. Fractional Kelly is optimized from the full P&L distribution and hard-capped by the constitution. Defined-loss portfolio limits remain authoritative.
+10. The allocator supports two validated routes: volatility-surface value with an RV edge, or directional-distribution value with strict IV price discipline. Both require positive base and adverse-stress EV.
 
 ## Execution and emergency behavior
 

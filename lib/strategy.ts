@@ -78,8 +78,9 @@ export async function scanSurface(symbol: string, contractType: "call" | "put" =
     };
   }).filter((row): row is RawCandidate => row !== null);
 
-  const fits = fitVolatilitySurface(raw, spot);
-  return raw.map((row, index) => {
+  const surfaceRows = raw.filter((row) => surfaceInputEligible(row, spot));
+  const fits = fitVolatilitySurface(surfaceRows, spot);
+  return surfaceRows.map((row, index) => {
     const fit = fits[index];
     return {
       ...row,
@@ -92,6 +93,22 @@ export async function scanSurface(symbol: string, contractType: "call" | "put" =
       dataFeed: snapshotsResponse.meta.feed,
     };
   }).sort((left, right) => left.surface.residualZScore - right.surface.residualZScore);
+}
+
+export function surfaceInputEligible(candidate: Pick<Candidate, "strike" | "bid" | "ask" | "openInterest" | "delta">, spot: number) {
+  const midpoint = (candidate.bid + candidate.ask) / 2;
+  const spread = midpoint > 0 ? (candidate.ask - candidate.bid) / midpoint : Number.POSITIVE_INFINITY;
+  const delta = Math.abs(candidate.delta ?? 0);
+  return Number.isFinite(spot)
+    && spot > 0
+    && candidate.bid > 0
+    && candidate.ask > candidate.bid
+    && midpoint >= numberEnv("MIN_SURFACE_OPTION_MID", 0.10)
+    && spread <= numberEnv("MAX_SURFACE_INPUT_SPREAD_PCT", 0.20)
+    && (candidate.openInterest ?? 0) >= numberEnv("MIN_SURFACE_INPUT_OPEN_INTEREST", 50)
+    && Math.abs(Math.log(candidate.strike / spot)) <= numberEnv("MAX_SURFACE_LOG_MONEYNESS", 0.20)
+    && delta >= numberEnv("MIN_SURFACE_DELTA", 0.05)
+    && delta <= numberEnv("MAX_SURFACE_DELTA", 0.95);
 }
 
 export function selectCandidate(candidates: Candidate[]) {

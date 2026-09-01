@@ -226,6 +226,16 @@ export function forecastForDte(forecast: ResearchForecast, calendarDte: number) 
   return forecastForTradingDays(forecast, Math.max(1, Math.round(calendarDte * 252 / 365)));
 }
 
+export function holdingDirection(forecast: ResearchForecast, horizonTradingDays = numberEnv("EXPECTED_HOLDING_DAYS", 3)) {
+  const horizon = forecastForTradingDays(forecast, horizonTradingDays);
+  if (!horizon || !validationPassed(horizon.validation)) return null;
+  return {
+    contractType: horizon.probabilityUp >= 0.5 ? "call" as const : "put" as const,
+    conviction: Math.abs(horizon.probabilityUp - 0.5),
+    horizon,
+  };
+}
+
 export function researchForecastPassed(forecast: ResearchForecast) {
   const optionHorizon = forecastForTradingDays(forecast, 20);
   const holdingHorizon = forecastForTradingDays(forecast, numberEnv("EXPECTED_HOLDING_DAYS", 3));
