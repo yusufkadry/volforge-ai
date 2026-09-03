@@ -1,3 +1,4 @@
+import { STRATEGY_VERSION } from "@/lib/constitution";
 import type { TradePlan } from "@/lib/reward-engine";
 
 function nyseDate(now = new Date()) {
@@ -6,8 +7,8 @@ function nyseDate(now = new Date()) {
   return `${value("year")}${value("month")}${value("day")}`;
 }
 
-export function executionKey(plan: TradePlan, now = new Date()) {
-  return ["vf", "paper", nyseDate(now), plan.candidate.underlying, plan.candidate.optionSymbol, plan.shortLeg.optionSymbol].join(":");
+export function executionKey(plan: TradePlan, now = new Date(), decisionTrace = "legacy") {
+  return ["vf", "paper", nyseDate(now), STRATEGY_VERSION, plan.candidate.underlying, plan.candidate.optionSymbol, plan.shortLeg.optionSymbol, decisionTrace.slice(0, 12)].join(":");
 }
 
 export function intentClientOrderId(traceId: string, leg: "entry" | "exit") {
@@ -21,7 +22,9 @@ export function brokerMlegCreditLimit(credit: number) {
 
 export function economicMlegCredit(value: unknown, fallback = 0) {
   const parsed = Number(value);
-  if (Number.isFinite(parsed) && parsed !== 0) return Math.abs(parsed);
+  // Alpaca represents multi-leg debits as positive prices and credits as negative.
+  // The journal stores the position owner's economics, where received credit is positive.
+  if (Number.isFinite(parsed) && parsed !== 0) return -parsed;
   return Math.max(0, Number.isFinite(fallback) ? fallback : 0);
 }
 

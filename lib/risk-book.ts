@@ -11,8 +11,16 @@ export async function createRiskSnapshot(traceId: string, settings: AgentSetting
   const priorClose = number(account.last_equity);
   const dailyPnl = priorClose > 0 ? equity - priorClose : 0;
   const optionPositions = positions.filter((position) => String(position.asset_class) === "us_option");
+  const positionsBySymbol = new Map(optionPositions.map((position) => [String(position.symbol), position]));
   const trackedSymbols = new Set(intents.flatMap((intent) => [intent.long_leg, intent.short_leg]));
   const orphanPositions = optionPositions.filter((position) => !trackedSymbols.has(String(position.symbol)));
+  const structuralMismatches = intents.filter((intent) => {
+    const long = positionsBySymbol.get(intent.long_leg);
+    const short = positionsBySymbol.get(intent.short_leg);
+    const expectsExposure = ["open", "exit_pending", "exit_submitted", "exit_partial", "exit_cancel_pending", "reconciliation_error"].includes(intent.status);
+    if (!long && !short) return expectsExposure;
+    return !long || !short || number(long.qty) <= 0 || number(short.qty) >= 0 || Math.abs(number(long.qty)) !== Math.abs(number(short.qty));
+  });
   const shadowRisk = settings.promotion_stage === "shadow" ? shadowPositions.reduce((total, position) => total + Math.max(0, number(position.max_loss)), 0) : 0;
   const structureRisk = intents.reduce((total, intent) => total + Math.max(0, number(intent.max_loss)), 0) + shadowRisk;
   const orphanRisk = orphanPositions.reduce((total, position) => {
@@ -40,7 +48,7 @@ export async function createRiskSnapshot(traceId: string, settings: AgentSetting
       { name: "Daily loss limit", passed: dailyPnl > -settings.max_daily_loss, detail: `${dailyPnl.toFixed(2)} / -${settings.max_daily_loss.toFixed(2)}` },
       { name: "Position limit", passed: openPositions < settings.max_open_positions, detail: `${openPositions} / ${settings.max_open_positions}` },
       { name: "Premium budget", passed: premiumAtRisk <= equity * CONSTITUTION.portfolio.maxPremiumRiskPct * settings.max_open_positions, detail: `$${premiumAtRisk.toFixed(0)} at risk` },
-      { name: "Broker reconciliation", passed: orphanPositions.length === 0, detail: orphanPositions.length ? `${orphanPositions.length} untracked broker option leg${orphanPositions.length === 1 ? "" : "s"}` : "Every broker option leg maps to an execution intent" },
+      { name: "Broker reconciliation", passed: orphanPositions.length === 0 && structuralMismatches.length === 0, detail: orphanPositions.length || structuralMismatches.length ? `${orphanPositions.length} orphan leg(s), ${structuralMismatches.length} incomplete or quantity-mismatched structure(s)` : "Every broker option leg maps to a complete, ratio-matched execution intent" },
       { name: "Emergency state", passed: !settings.emergency_stop, detail: settings.emergency_stop ? "Emergency liquidation is active; entries blocked" : "No emergency stop" },
     ],
   };

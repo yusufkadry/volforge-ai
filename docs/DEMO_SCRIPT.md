@@ -32,7 +32,7 @@ Show Court and Risk Constitution.
 
 Show Shadow and Execution Ledger.
 
-“The same structure first ran in a shadow digital twin at adverse bid/ask prices. After closed evidence passed, VolForge reserved an idempotent intent and sent one atomic Alpaca Level 3 multi-leg order. Railway reconciles REST every 30 seconds while GitHub provides an independent watchdog and a pinned Alpaca CLI account oracle.”
+“VolForge preserves its adverse-price shadow twin as the standard promotion path. For this compressed competition run, the operator bootstrap is explicitly journaled instead of inventing evidence; every market, model, payoff, portfolio, and broker gate still has to pass before VolForge reserves an idempotent intent and sends one atomic Alpaca Level 3 multi-leg order.”
 
 Show broker IDs, fill price, and lifecycle states.
 

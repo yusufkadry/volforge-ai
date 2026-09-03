@@ -1,7 +1,16 @@
 import { env, numberEnv } from "@/lib/env";
 import type { AgentSettings, CalibrationSnapshot, CliPreflight, ControlRequest, Decision, ExecutionIntent, ResearchRun, ServiceHeartbeat, ShadowPosition } from "@/lib/types";
 
-function baseUrl() { return `${env("SUPABASE_URL").replace(/\/$/, "")}/rest/v1`; }
+function baseUrl() {
+  let url: URL;
+  try { url = new URL(env("SUPABASE_URL")); }
+  catch { throw new Error("SUPABASE_URL must be a valid HTTPS project URL."); }
+  const path = url.pathname.replace(/\/$/, "") || "/";
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || path !== "/") {
+    throw new Error("SUPABASE_URL must be an HTTPS origin without credentials, a path, query, or fragment.");
+  }
+  return `${url.origin}/rest/v1`;
+}
 
 async function rawRequest(path: string, init: RequestInit = {}) {
   const key = env("SUPABASE_SERVICE_ROLE_KEY");
@@ -9,7 +18,7 @@ async function rawRequest(path: string, init: RequestInit = {}) {
   headers.set("apikey", key);
   headers.set("authorization", `Bearer ${key}`);
   headers.set("content-type", "application/json");
-  const response = await fetch(`${baseUrl()}${path}`, { ...init, headers, cache: "no-store", signal: init.signal ?? AbortSignal.timeout(numberEnv("SUPABASE_REQUEST_TIMEOUT_MS", 20_000)) });
+  const response = await fetch(`${baseUrl()}${path}`, { ...init, headers, cache: "no-store", redirect: "error", signal: init.signal ?? AbortSignal.timeout(numberEnv("SUPABASE_REQUEST_TIMEOUT_MS", 20_000)) });
   if (!response.ok) throw new Error(`Supabase ${response.status}: ${await response.text()}`);
   return response;
 }
@@ -34,7 +43,7 @@ export const journal = {
   decisionCount: () => count("/agent_decisions?select=id&limit=1"),
   submittedDecisionCount: () => count("/agent_decisions?status=eq.SUBMITTED&select=id&limit=1"),
   latestMarketDecision: async () => (await request<Decision[]>("/agent_decisions?source=in.(scheduled,manual)&select=*&order=created_at.desc&limit=1"))[0] ?? null,
-  latestResearchDecision: async () => (await request<Decision[]>("/agent_decisions?source=in.(autonomous_research_factory,weekend_research_factory)&select=*&order=created_at.desc&limit=1"))[0] ?? null,
+  latestResearchDecision: async () => (await request<Decision[]>("/agent_decisions?source=in.(autonomous_research_factory,weekend_research_factory,railway_research_watchdog)&select=*&order=created_at.desc&limit=1"))[0] ?? null,
   decisionByTrace: (traceId: string) => request<Decision[]>(`/agent_decisions?trace_id=eq.${encodeURIComponent(traceId)}&select=*`),
   writeDecision: (decision: Decision) => request<Decision[]>("/agent_decisions", {
     method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify(decision),
@@ -90,6 +99,7 @@ export const journal = {
   }) : Promise.resolve([]),
   latestRiskSnapshot: async () => (await request<Array<Record<string, unknown>>>("/risk_snapshots?select=*&order=created_at.desc&limit=1"))[0] ?? null,
   intents: () => request<ExecutionIntent[]>("/execution_intents?select=*&order=created_at.desc&limit=100"),
+  recentFailedIntents: (since: string) => request<ExecutionIntent[]>(`/execution_intents?status=eq.error&updated_at=gte.${encodeURIComponent(since)}&select=*&order=updated_at.desc&limit=100`),
   closedIntents: () => request<ExecutionIntent[]>("/execution_intents?status=eq.closed&select=*&order=created_at.desc&limit=200"),
   activeIntents: () => request<ExecutionIntent[]>(`/execution_intents?status=in.(${activeStatuses})&select=*&order=created_at.asc`),
   activeIntentForUnderlying: async (underlying: string) => (await request<ExecutionIntent[]>(`/execution_intents?underlying=eq.${encodeURIComponent(underlying)}&status=in.(${activeStatuses})&select=*&order=created_at.desc&limit=1`))[0] ?? null,

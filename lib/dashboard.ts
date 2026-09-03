@@ -1,4 +1,5 @@
 import { alpaca } from "@/lib/alpaca";
+import { selectResearchRun } from "@/lib/research";
 import { journal } from "@/lib/supabase";
 import type { DashboardSnapshot } from "@/lib/types";
 
@@ -10,6 +11,9 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
   ]);
   const [account, positions, orders, portfolioHistory, clock, decisions, decisionTotal, submittedDecisionTotal, latestMarketDecision, latestResearchDecision, settings, research, shadowPositions, riskSnapshot, intents, calibration, executionHeartbeat, cliPreflight, latestControlRequest, accountAttestation] = settled.map((result) => result.status === "fulfilled" ? result.value : null);
   const errors = settled.flatMap((result) => result.status === "rejected" ? [result.reason instanceof Error ? result.reason.message : "Unknown service error"] : []);
+  const resolvedSettings = (settings ?? { trading_enabled: false, emergency_stop: false, max_premium_per_trade: 500, max_daily_loss: 1000, max_open_positions: 3, promotion_stage: "research" }) as DashboardSnapshot["settings"];
+  const resolvedResearch = (research ?? []) as DashboardSnapshot["research"];
+  const activeResearch = selectResearchRun(resolvedResearch, resolvedSettings.promotion_stage !== "research").selected;
   return {
     account: account as DashboardSnapshot["account"],
     positions: (positions ?? []) as DashboardSnapshot["positions"],
@@ -19,8 +23,9 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
     submittedDecisionTotal: Number(submittedDecisionTotal ?? 0),
     latestMarketDecision: latestMarketDecision as DashboardSnapshot["latestMarketDecision"],
     latestResearchDecision: latestResearchDecision as DashboardSnapshot["latestResearchDecision"],
-    settings: (settings ?? { trading_enabled: false, emergency_stop: false, max_premium_per_trade: 500, max_daily_loss: 1000, max_open_positions: 3, promotion_stage: "research" }) as DashboardSnapshot["settings"],
-    research: (research ?? []) as DashboardSnapshot["research"],
+    settings: resolvedSettings,
+    research: resolvedResearch,
+    activeResearchTraceId: activeResearch?.trace_id ?? null,
     shadowPositions: (shadowPositions ?? []) as DashboardSnapshot["shadowPositions"],
     riskSnapshot: riskSnapshot as DashboardSnapshot["riskSnapshot"],
     intents: (intents ?? []) as DashboardSnapshot["intents"],

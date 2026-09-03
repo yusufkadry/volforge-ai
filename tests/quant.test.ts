@@ -3,8 +3,9 @@ import test from "node:test";
 import { blackScholesPrice, inverseNormal, normalCdf } from "../lib/math";
 import { evaluateVerticalSpread, verticalExpirationPayoff } from "../lib/options-model";
 import { fitVolatilitySurface } from "../lib/surface-engine";
-import { alphaSignal, analyzeTradePlans, candidatesWithoutActiveExposure } from "../lib/reward-engine";
+import { alphaSignal, analyzeTradePlans, candidatesWithoutActiveExposure, executionLegFailure } from "../lib/reward-engine";
 import { riskGates, surfaceInputEligible } from "../lib/strategy";
+import { composeStructure } from "../lib/structure-composer";
 import { candidate, horizon } from "./fixtures";
 import type { ResearchForecast } from "../lib/types";
 
@@ -51,6 +52,12 @@ test("negative put delta passes the absolute directional gate", () => {
   const put = candidate({ optionSymbol: "TEST261218P00100000", contractType: "put", delta: -0.45 });
   const gate = riskGates(put, true).find((value) => value.name === "Absolute delta target");
   assert.equal(gate?.passed, true);
+});
+
+test("execution diagnostics distinguish stale data from liquidity failures", () => {
+  assert.equal(executionLegFailure(candidate({ quoteTimestamp: new Date(Date.now() - 10 * 60_000).toISOString() }), true), "stale quote");
+  assert.equal(executionLegFailure(candidate({ bid: 1, ask: 1.2, midpoint: 1.1 }), true), "quote spread");
+  assert.equal(executionLegFailure(candidate({ openInterest: 10 }), true), "open interest");
 });
 
 test("distributional valuation has no artificial 25 percent probability floor", () => {
@@ -125,6 +132,23 @@ test("a strong calibrated directional distribution produces a ranked defined-ris
   assert.ok(result.plans[0].rewardRisk >= 1.25);
   assert.ok(result.plans[0].baseExpectedValue >= 8);
   assert.ok(result.plans[0].stressedExpectedValue >= 0);
+});
+
+test("a bearish forecast produces an atomic long put debit spread", () => {
+  const neutralSurface = { ...candidate().surface, fairIv: 0.24, residualIv: 0, relativeResidual: 0, residualZScore: 0 };
+  const long = candidate({ optionSymbol: "TEST261218P00100000", contractType: "put", strike: 100, bid: 2, ask: 2.08, midpoint: 2.04, delta: -0.5, impliedVolatility: 0.24, surface: neutralSurface });
+  const short = candidate({ optionSymbol: "TEST261218P00095000", contractType: "put", strike: 95, bid: 0.8, ask: 0.84, midpoint: 0.82, delta: -0.25, impliedVolatility: 0.24, surface: neutralSurface });
+  const holding = horizon(3, { probabilityUp: 0.28, expectedLogReturn: -0.04, sigmaLogReturn: 0.025, forecastRv: 0.25 });
+  const option = horizon(20, { probabilityUp: 0.35, expectedLogReturn: -0.07, sigmaLogReturn: 0.07, forecastRv: 0.26 });
+  const forecast = { symbol: "TEST", generatedAt: new Date().toISOString(), horizons: [holding, option], forecastRv: option.forecastRv, probabilityUp: option.probabilityUp, validation: option.validation, featureValues: [] } satisfies ResearchForecast;
+  const result = analyzeTradePlans([long, short], new Map([["TEST", forecast]]), 100_000, 500);
+  assert.ok(result.plans.length >= 1);
+  const structure = composeStructure(result.plans[0], "vf-entry-put-test");
+  assert.deepEqual(structure.payload.legs, [
+    { symbol: "TEST261218P00100000", ratio_qty: "1", side: "buy", position_intent: "buy_to_open" },
+    { symbol: "TEST261218P00095000", ratio_qty: "1", side: "sell", position_intent: "sell_to_open" },
+  ]);
+  assert.ok(Number(structure.payload.limit_price) > 0);
 });
 
 test("active exposure is removed before ranking so the next symbol can diversify", () => {

@@ -14,6 +14,7 @@ type OosOutcome = { actualVol: number; predictedVol: number; baselineVol: number
 
 export const FEATURE_NAMES = ["rv5", "rv10", "rv20", "rv60", "downside20", "momentum5", "momentum20", "momentum60", "range20", "volume_z", "drawdown20"];
 export const MODEL_VERSION = "purged-horizon-ensemble-v3";
+export const DEFAULT_RESEARCH_MAX_AGE_MS = 30 * 60 * 60_000;
 
 function number(value: unknown) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : 0; }
 function dailyReturns(bars: Bar[]) { return bars.slice(1).map((bar, index) => Math.log(bar.c / bars[index].c)); }
@@ -260,6 +261,28 @@ function isResearchForecast(value: unknown): value is ResearchForecast {
 export function forecastsFromRun(run: ResearchRun | null | undefined): ResearchForecast[] {
   if (!run || !run.report || !Array.isArray(run.report.forecasts)) return [];
   return run.report.forecasts.filter(isResearchForecast);
+}
+
+export function researchConstitutionMatches(run: ResearchRun | null | undefined) {
+  return typeof run?.report?.constitution_hash === "string" && run.report.constitution_hash === constitutionHash();
+}
+
+function runTimestamp(run: ResearchRun | null | undefined) {
+  const generated = typeof run?.report?.generated_at === "string" ? run.report.generated_at : run?.created_at;
+  return generated ? new Date(generated).getTime() : 0;
+}
+
+export function selectResearchRun(runs: ResearchRun[], preferChampion: boolean, nowMs = Date.now(), maxAgeMs = numberEnv("RESEARCH_MAX_AGE_MS", DEFAULT_RESEARCH_MAX_AGE_MS)) {
+  const usable = runs.filter((run) => researchConstitutionMatches(run) && forecastsFromRun(run).length > 0).sort((left, right) => runTimestamp(right) - runTimestamp(left));
+  const newest = usable[0] ?? null;
+  const champion = preferChampion
+    ? usable.find((run) => {
+      const age = nowMs - runTimestamp(run);
+      return run.strategy_version === STRATEGY_VERSION && run.promotion_recommendation === "shadow" && age >= 0 && age <= maxAgeMs;
+    }) ?? null
+    : null;
+  const selected = champion ?? newest;
+  return { selected, newest, champion, usedChampion: Boolean(champion && champion.trace_id !== newest?.trace_id) };
 }
 
 export async function runResearch(): Promise<{ run: ResearchRun; forecasts: ResearchForecast[] }> {

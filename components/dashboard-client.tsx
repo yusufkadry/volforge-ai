@@ -72,6 +72,27 @@ export default function DashboardClient() {
     setSaving(false);
   }
 
+  async function launchPaper() {
+    if (!data || !window.confirm("Authorize autonomous Alpaca Paper execution now? This records an explicit competition launch authorization and arms new entries. Every market, liquidity, model, payoff, portfolio, and defined-loss gate remains mandatory.")) return;
+    setSaving(true); setNotice("");
+    try {
+      const rearmResponse = await fetch("/api/controls/rearm", { method: "POST" });
+      const rearmBody = await rearmResponse.json().catch(() => ({})) as { error?: string };
+      if (!rearmResponse.ok) throw new Error(rearmBody.error ?? "Broker could not be re-armed.");
+      const response = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ promotion_stage: "paper", trading_enabled: true, paper_bootstrap_confirmed: true }),
+      });
+      const body = await response.json().catch(() => ({})) as { error?: string } & Partial<DashboardSnapshot["settings"]>;
+      if (!response.ok) throw new Error(body.error ?? "Paper launch could not be authorized.");
+      setData((current) => current ? { ...current, settings: body as DashboardSnapshot["settings"] } : current);
+      setNotice("Paper stage authorized and autonomous new entries armed. Railway remains the execution authority.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Paper launch failed.");
+    } finally { setSaving(false); }
+  }
+
   async function logout() { await fetch("/api/auth/logout", { method: "POST" }); window.location.assign("/login"); }
   async function hardKill() {
     if (!window.confirm("Block new entries, cancel working orders, and liquidate every tracked or orphaned paper option position?")) return;
@@ -100,7 +121,8 @@ export default function DashboardClient() {
   const submitted = data?.submittedDecisionTotal ?? 0;
   const displayedDecisions = data?.decisions.length ?? 0;
   const summary = useMemo(() => `${submitted} submitted / ${displayedDecisions} recent shown`, [displayedDecisions, submitted]);
-  const research = data?.research[0];
+  const newestResearch = data?.research[0];
+  const research = data?.research.find((run) => run.trace_id === data.activeResearchTraceId) ?? newestResearch;
   const researchReport = research?.report as { strongest_models?: number; forecasts?: Array<{ validation?: { directionAccuracy?: number } }> } | undefined;
   const shadowPositions = data?.shadowPositions ?? [];
   const shadowPnl = shadowPositions.reduce((total, position) => total + asNumber(position.pnl), 0);
@@ -123,8 +145,7 @@ export default function DashboardClient() {
   const heartbeatAge = data?.executionHeartbeat?.last_seen_at ? Math.max(0, Date.now() - new Date(data.executionHeartbeat.last_seen_at).getTime()) : Number.POSITIVE_INFINITY;
   const workerHealthy = data?.executionHeartbeat?.status === "healthy" && heartbeatAge <= 120_000;
   const accountEligible = data?.accountAttestation?.eligible_preflight === true && String(data.accountAttestation.account_id ?? "") === String(account.id ?? account.account_number ?? "");
-  const cliAge = data?.cliPreflight?.created_at ? Math.max(0, Date.now() - new Date(data.cliPreflight.created_at).getTime()) : Number.POSITIVE_INFINITY;
-  const cliHealthy = data?.cliPreflight?.healthy === true && data.cliPreflight.paper === true && data.cliPreflight.account_id === String(account.id ?? account.account_number ?? "") && cliAge <= 45 * 60_000;
+  const cliHealthy = data?.cliPreflight?.healthy === true && data.cliPreflight.paper === true && data.cliPreflight.account_id === String(account.id ?? account.account_number ?? "");
   const controlRequestActive = data?.latestControlRequest?.status === "pending" || data?.latestControlRequest?.status === "running";
 
   return <main className="app-shell">
@@ -163,8 +184,8 @@ export default function DashboardClient() {
 
         <section className="panel controls-panel">
           <div className="panel-heading"><div><p className="eyebrow">EXECUTION AGENT</p><h2>Control plane</h2></div><SlidersHorizontal size={19} /></div>
-          <div className="control-row"><div><strong>New paper entries</strong><p>Disabling entries never disables position exits.</p></div><label className="switch"><input type="checkbox" checked={Boolean(data?.settings.trading_enabled)} disabled={!data || saving || data.settings.emergency_stop} onChange={(event) => data && void saveSettings({ ...data.settings, trading_enabled: event.target.checked })} /><span /></label></div>
-          <label className="mode-select"><span>Capital stage</span><select value={data?.settings.promotion_stage ?? "research"} disabled={!data || saving} onChange={(event) => data && void saveSettings({ ...data.settings, promotion_stage: event.target.value as "research" | "shadow" | "paper" })}><option value="research">Research</option><option value="shadow">Shadow</option><option value="paper">Paper</option></select></label>
+          <div className="control-row"><div><strong>New paper entries</strong><p>Disabling entries never disables position exits.</p></div><label className="switch"><input type="checkbox" checked={Boolean(data?.settings.trading_enabled)} disabled={!data || saving || data.settings.emergency_stop || data.settings.promotion_stage !== "paper"} onChange={(event) => data && void saveSettings({ ...data.settings, trading_enabled: event.target.checked })} /><span /></label></div>
+          <label className="mode-select"><span>Capital stage</span><select value={data?.settings.promotion_stage ?? "research"} disabled={!data || saving} onChange={(event) => { if (!data) return; const stage = event.target.value as "research" | "shadow" | "paper"; if (stage === "paper") void launchPaper(); else void saveSettings({ ...data.settings, promotion_stage: stage, trading_enabled: false }); }}><option value="research">Research</option><option value="shadow">Shadow</option><option value="paper">Paper</option></select></label>
           <label className="cap-input"><span>Max premium per trade</span><div><b>$</b><input type="number" min="1" value={data?.settings.max_premium_per_trade ?? 500} disabled={!data || saving} onChange={(event) => data && setData({ ...data, settings: { ...data.settings, max_premium_per_trade: Number(event.target.value) } })} onBlur={() => data && void saveSettings(data.settings)} /></div></label>
           <button className="primary-button run-button" type="button" disabled={!data || running || controlRequestActive} onClick={() => void runScan()}><Play size={17} fill="currentColor" />{running || controlRequestActive ? "Agent request in progress" : "Run agent now"}</button>
           <button className="hard-kill" type="button" disabled={!data || saving} onClick={() => void hardKill()}><ShieldAlert size={16} />Emergency liquidate and lock</button>
@@ -201,12 +222,12 @@ export default function DashboardClient() {
 
       <section className="panel calibration-panel">
         <div className="panel-heading"><div><p className="eyebrow">JUDGE MODE / ALPACA PAPER PERFORMANCE</p><h2>Broker-backed performance record</h2></div><span className="score-chip">PAPER ACCOUNT</span></div>
-        <div className="judge-grid"><div><span>Closed structures</span><strong>{number.format(closedIntents.length)}</strong></div><div><span>Realized P&L</span><strong className={realizedPnl >= 0 ? "positive-text" : "negative-text"}>{money.format(realizedPnl)}</strong></div><div><span>Win rate</span><strong>{(realizedWinRate * 100).toFixed(0)}%</strong></div><div><span>Implementation shortfall</span><strong>{money.format(implementationShortfall)}</strong></div><div><span>Maximum drawdown</span><strong className="negative-text">{(maxDrawdown(equityCurve) * 100).toFixed(2)}%</strong></div><div><span>Evidence trails</span><strong>{number.format(decisionCount)}</strong></div><div><span>Account preflight</span><strong className={accountEligible ? "positive-text" : "negative-text"}>{accountEligible ? "PASSED" : "PENDING"}</strong></div><div><span>CLI oracle</span><strong className={cliHealthy ? "positive-text" : "negative-text"}>{cliHealthy ? "FRESH" : "PENDING"}</strong></div></div>
+        <div className="judge-grid"><div><span>Closed structures</span><strong>{number.format(closedIntents.length)}</strong></div><div><span>Realized P&L</span><strong className={realizedPnl >= 0 ? "positive-text" : "negative-text"}>{money.format(realizedPnl)}</strong></div><div><span>Win rate</span><strong>{(realizedWinRate * 100).toFixed(0)}%</strong></div><div><span>Implementation shortfall</span><strong>{money.format(implementationShortfall)}</strong></div><div><span>Maximum drawdown</span><strong className="negative-text">{(maxDrawdown(equityCurve) * 100).toFixed(2)}%</strong></div><div><span>Evidence trails</span><strong>{number.format(decisionCount)}</strong></div><div><span>Account preflight</span><strong className={accountEligible ? "positive-text" : "negative-text"}>{accountEligible ? "PASSED" : "PENDING"}</strong></div><div><span>CLI oracle</span><strong className={cliHealthy ? "positive-text" : "negative-text"}>{cliHealthy ? "VERIFIED" : "PENDING"}</strong></div></div>
         <p className="allocation-note">Performance is computed from reconciled Alpaca paper structures. The account attestation and pinned CLI oracle must both match the connected account before paper entry.</p>
       </section>
 
       <section className="research-grid">
-        <section className="panel research-panel"><div className="panel-heading"><div><p className="eyebrow">RESEARCH FACTORY</p><h2>Champion promotion</h2></div><FlaskConical size={19} /></div><div className="ladder"><span className={data?.settings.promotion_stage === "research" ? "active" : ""}>Research</span><i /><span className={data?.settings.promotion_stage === "shadow" ? "active" : ""}>Shadow</span><i /><span className={data?.settings.promotion_stage === "paper" ? "active" : ""}>Paper</span></div><div className="research-metrics"><div><strong>{researchReport?.strongest_models ?? 0}</strong><span>validated symbols</span></div><div><strong>{researchReport?.forecasts?.length ?? 0}</strong><span>model forecasts</span></div><div><strong>{research?.promotion_recommendation ?? "pending"}</strong><span>recommendation</span></div></div><p className="muted">Last autonomous research: {shortTime(research?.created_at)}. Walk-forward score must beat its baseline before a strategy may enter shadow mode.</p></section>
+        <section className="panel research-panel"><div className="panel-heading"><div><p className="eyebrow">RESEARCH FACTORY</p><h2>Champion promotion</h2></div><FlaskConical size={19} /></div><div className="ladder"><span className={data?.settings.promotion_stage === "research" ? "active" : ""}>Research</span><i /><span className={data?.settings.promotion_stage === "shadow" ? "active" : ""}>Shadow</span><i /><span className={data?.settings.promotion_stage === "paper" ? "active" : ""}>Paper</span></div><div className="research-metrics"><div><strong>{researchReport?.strongest_models ?? 0}</strong><span>validated symbols</span></div><div><strong>{researchReport?.forecasts?.length ?? 0}</strong><span>model forecasts</span></div><div><strong>{research?.promotion_recommendation ?? "pending"}</strong><span>active champion</span></div></div><p className="muted">Active model: {shortTime(research?.created_at)}. Latest challenger: {newestResearch?.promotion_recommendation ?? "pending"} at {shortTime(newestResearch?.created_at)}.</p></section>
         <section className="panel research-panel"><div className="panel-heading"><div><p className="eyebrow">COUNTERFACTUAL VAULT</p><h2>Shadow digital twin</h2></div><Bot size={19} /></div><div className="shadow-number">{money.format(shadowPnl)}</div><p className="muted">{closedShadow.length} closed / {shadowPositions.filter((position) => position.status === "open").length} open, marked and exited at adverse executable quotes.</p><div className="constitution"><ShieldCheck size={17} /><span>Promotion is calculated only from closed out-of-sample shadow structures.</span></div></section>
         <section className="panel research-panel"><div className="panel-heading"><div><p className="eyebrow">RISK CONSTITUTION</p><h2>Portfolio circuit breakers</h2></div><ShieldCheck size={19} /></div><div className="risk-list">{((data?.riskSnapshot?.circuit_breakers as Array<{ name: string; passed: boolean; detail: string }> | undefined) ?? []).map((gate) => <div key={gate.name}><i className={gate.passed ? "live-dot" : "closed-dot"} /><span>{gate.name}</span><strong>{gate.detail}</strong></div>)}{!data?.riskSnapshot && <p className="muted">The first research run writes a portfolio snapshot here.</p>}</div></section>
       </section>

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { forecastForTradingDays, forecastsFromRun, holdingDirection, samplesFromBars, walkForward, type Bar } from "../lib/research";
+import { forecastForTradingDays, forecastsFromRun, holdingDirection, samplesFromBars, selectResearchRun, walkForward, type Bar } from "../lib/research";
+import { constitutionHash, STRATEGY_VERSION } from "../lib/constitution";
 import { horizon } from "./fixtures";
 import type { ResearchForecast, ResearchRun } from "../lib/types";
 
@@ -12,6 +13,19 @@ function syntheticBars(length = 760): Bar[] {
     close *= Math.exp(dailyReturn);
     return { o: open, h: Math.max(open, close) * 1.006, l: Math.min(open, close) * 0.994, c: close, v: 1_000_000 + Math.sin(index / 9) * 100_000, t: new Date(Date.UTC(2023, 0, 1 + index)).toISOString() };
   });
+}
+
+function researchRun(trace: string, recommendation: ResearchRun["promotion_recommendation"], generatedAt: string, strategyVersion = STRATEGY_VERSION): ResearchRun {
+  const representative = horizon(20);
+  const forecast = {
+    symbol: "SPY", generatedAt, horizons: [horizon(3), representative],
+    forecastRv: representative.forecastRv, probabilityUp: representative.probabilityUp,
+    validation: representative.validation, featureValues: [],
+  } satisfies ResearchForecast;
+  return {
+    created_at: generatedAt, strategy_version: strategyVersion, universe: ["SPY"],
+    report: { generated_at: generatedAt, constitution_hash: constitutionHash(), forecasts: [forecast] }, promotion_recommendation: recommendation, trace_id: trace,
+  };
 }
 
 test("purged walk-forward excludes every overlapping label", () => {
@@ -50,4 +64,40 @@ test("execution direction follows the validated holding horizon, not the represe
   const direction = holdingDirection(forecast, 3);
   assert.equal(direction?.contractType, "put");
   assert.ok((direction?.conviction ?? 0) > 0.07);
+});
+
+test("a failed challenger cannot replace a fresh approved champion in capital stages", () => {
+  const now = Date.parse("2026-09-02T13:30:00.000Z");
+  const champion = researchRun("champion", "shadow", new Date(now - 18 * 60 * 60_000).toISOString());
+  const challenger = researchRun("challenger", "reject", new Date(now - 2 * 60 * 60_000).toISOString());
+  const selection = selectResearchRun([champion, challenger], true, now, 30 * 60 * 60_000);
+  assert.equal(selection.newest?.trace_id, "challenger");
+  assert.equal(selection.selected?.trace_id, "champion");
+  assert.equal(selection.usedChampion, true);
+});
+
+test("research stage evaluates the newest challenger", () => {
+  const now = Date.parse("2026-09-02T13:30:00.000Z");
+  const champion = researchRun("champion", "shadow", new Date(now - 8 * 60 * 60_000).toISOString());
+  const challenger = researchRun("challenger", "reject", new Date(now - 60 * 60_000).toISOString());
+  assert.equal(selectResearchRun([champion, challenger], false, now).selected?.trace_id, "challenger");
+});
+
+test("stale or different-strategy approvals cannot become the active champion", () => {
+  const now = Date.parse("2026-09-02T13:30:00.000Z");
+  const stale = researchRun("stale", "shadow", new Date(now - 31 * 60 * 60_000).toISOString());
+  const oldVersion = researchRun("old-version", "shadow", new Date(now - 2 * 60 * 60_000).toISOString(), "volforge-v3");
+  const challenger = researchRun("challenger", "reject", new Date(now - 60 * 60_000).toISOString());
+  const selection = selectResearchRun([stale, oldVersion, challenger], true, now, 30 * 60 * 60_000);
+  assert.equal(selection.champion, null);
+  assert.equal(selection.selected?.trace_id, "challenger");
+});
+
+test("a research artifact from a different constitution cannot enter capital selection", () => {
+  const now = Date.parse("2026-09-02T13:30:00.000Z");
+  const mismatched = researchRun("mismatched", "shadow", new Date(now - 60 * 60_000).toISOString());
+  mismatched.report.constitution_hash = "different-policy";
+  const selection = selectResearchRun([mismatched], true, now, 30 * 60 * 60_000);
+  assert.equal(selection.selected, null);
+  assert.equal(selection.champion, null);
 });

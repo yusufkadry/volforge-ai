@@ -30,7 +30,7 @@ GitHub concurrency serializes its own workflow. A Supabase lease also serializes
 
 ## “How is the Alpaca CLI actually part of capital control?”
 
-The pinned CLI queries the paper account and market clock in GitHub Actions, hashes the evidence, and publishes a short-lived oracle to Supabase. Paper promotion, arming, and each paper entry require that oracle to be healthy, recent, explicitly paper, and matched to the independently attested account.
+The pinned CLI queries the paper account and market clock in GitHub Actions, hashes the evidence, and publishes an account-bound proof to Supabase. Paper authorization, arming, and each paper entry require that proof to be healthy, explicitly paper, and matched to the independently attested account. Live Alpaca REST state, permissions, buying power, and market clock are revalidated every cycle.
 
 ## “What happens when I press Run Agent on Vercel?”
 
@@ -38,11 +38,11 @@ Vercel authenticates the request and writes a deduplicated command to Supabase. 
 
 ## “What happens if the WebSocket drops?”
 
-The stream degrades its heartbeat, but Alpaca REST remains authoritative. Railway reconciles every nonterminal order and broker position every 30 seconds. New paper exposure fails closed when the execution control plane is stale.
+The stream has its own heartbeat and may reconnect without overwriting execution health. Alpaca REST remains authoritative, and Railway reconciles every nonterminal order and broker position every 30 seconds. New paper exposure fails closed when REST reconciliation or the execution control plane is unhealthy.
 
 ## “Does the kill switch actually close positions?”
 
-Yes. It blocks entries first, keeps the broker available for risk-reducing actions, cancels working orders, closes tracked verticals, cleans up orphan option legs, confirms broker flatness, and only then suspends trading.
+Yes. It blocks entries first, keeps the broker available for risk-reducing actions, cancels risk-increasing orders without repeatedly canceling its own closes, and ladders tracked vertical exits. A bounded emergency-only escalation closes the short leg first before any remaining long leg, then VolForge confirms broker flatness and suspends trading last.
 
 ## “How do you account for unrealistic paper fills?”
 

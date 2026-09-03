@@ -16,7 +16,7 @@ VolForge does not ask an LLM to invent a trade. Independent numerical engines pr
 | Distribution | Integrates vertical-spread mark-forward P&L across calibrated base, fat-tail, and adverse stress scenarios. |
 | Event Intelligence | Deduplicates and scores source-qualified news by recency, event type, impact, and contradiction. It may veto only. |
 | Portfolio Governor | Enforces defined loss, concentration, delta, vega, CVaR, session, deadline, and account-level limits. |
-| Red Team | Challenges evidence consistency. The LLM can veto but can never override deterministic controls. |
+| Red Team | Challenges evidence consistency. Its machine-enforced veto jurisdiction is limited to contradictions, missing structure evidence, impossible payoff, stress-economics conflicts, and evidence-backed unmodeled jump events. It can never override deterministic controls. |
 | Execution | Reserves idempotent intent, submits atomic `mleg` orders, ladders limits, reconciles REST and stream truth, and manages exits. |
 
 Every model decision stores a strategy version, constitution hash, dataset hash, model manifest, validation evidence, quote feed, market trace, court opinions, risk snapshot, and broker lifecycle.
@@ -25,8 +25,8 @@ Every model decision stores a strategy version, constitution hash, dataset hash,
 
 | Service | Responsibility |
 |---|---|
-| Railway | Primary five-minute strategy cycle, 30-second broker reconciliation, position supervision, emergency liquidation, and Alpaca trade stream. |
-| GitHub Actions | Independent 15-minute market watchdog, pinned Alpaca CLI entry oracle, four-hour research factory, premarket refresh, CI, and competition-account attestation. |
+| Railway | Primary offset five-minute strategy cycle, 30-second broker reconciliation, position supervision, emergency liquidation, Alpaca trade stream, off-hours research recovery, and stale-model self-healing. |
+| GitHub Actions | Independent 15-minute market watchdog, pinned Alpaca CLI paper-account proof, four-hour research factory, premarket refresh, CI, and competition-account attestation. |
 | Vercel | Password-protected command room. Manual scans are durable commands consumed by Railway, not long-running Vercel requests. |
 | Supabase | Immutable decisions, research runs, model manifests, shadow marks, execution intents, order events, leases, heartbeats, calibration, and settings. |
 | Alpaca Paper | Account truth, market data, options contracts, atomic multi-leg paper orders, positions, and portfolio history. |
@@ -101,12 +101,12 @@ Railway reads `railway.toml` and starts `npm run worker:control-plane`. A health
 ## Operating sequence
 
 1. Keep the stage at **Research** while the research workflow generates purged horizon models.
-2. When the latest run recommends `shadow`, select **Shadow**. The settings API rejects promotion if validation did not pass.
+2. When a fresh current-strategy run recommends `shadow`, select **Shadow**. That run becomes the active champion; later failed challengers are retained for audit but cannot silently replace it. Daily-bar champions remain eligible for 30 hours by default, spanning the next market session while the four-hour research factory continues testing challengers.
 3. Shadow entries, marks, exits, MAE/MFE, and realized P&L use adverse executable quotes. A configurable 90-minute shadow evaluation window collects multiple execution and short-window directional samples during the compressed competition timeline; records explicitly state that this is not a substitute for the modeled holding horizon.
-4. Paper promotion is rejected until the configured number of closed shadow trades has positive expectancy, positive total P&L, and acceptable drawdown.
-5. Run the GitHub agent workflow once and require a fresh, healthy Alpaca CLI oracle for the same attested paper account.
-6. Select **Paper**, then arm **New paper entries**. The API also requires a matching competition attestation and healthy Railway heartbeat. Existing positions are supervised regardless of this switch.
-7. The competition deadline guard blocks late entries and forces all positions closed at `COMPETITION_EXIT_AT`.
+4. The standard Paper path requires the configured number of closed shadow trades to show positive expectancy, positive total P&L, and acceptable drawdown.
+5. Run the GitHub agent workflow once and require a healthy Alpaca CLI proof for the same attested paper account. The proof establishes CLI use, paper mode, and account identity; live Alpaca REST state is revalidated on every cycle.
+6. For the compressed competition timeline, selecting **Paper** may explicitly authorize an audited bootstrap without fabricating Shadow evidence. One confirmation re-arms Alpaca and enables Paper entries only after the Railway heartbeat, competition attestation, CLI account proof, ACTIVE account, no broker suspension, Options Level 3, and buying-power checks pass. Every trade-level gate remains mandatory.
+7. The competition deadline guard blocks late entries and forces all positions closed at `COMPETITION_EXIT_AT`. If four bounded atomic spread-close attempts fail by default, deadline liquidation automatically escalates short leg first and suppresses duplicate close orders.
 
 The system does not automatically arm paper capital. Once a stage is authorized, opportunity discovery, decision making, submission, repricing, position management, exit, and reconciliation are autonomous.
 
@@ -122,6 +122,7 @@ The system does not automatically arm paper capital. Once a stage is authorized,
 8. Base and adverse cases include bid/ask friction, fat-tail volatility regimes, IV-convergence assumptions, P&L percentiles, probability of profit, and 95% CVaR.
 9. Fractional Kelly is optimized from the full P&L distribution and hard-capped by the constitution. Defined-loss portfolio limits remain authoritative.
 10. The allocator supports two validated routes: volatility-surface value with an RV edge, or directional-distribution value with strict IV price discipline. Both require positive base and adverse-stress EV.
+11. In Shadow and Paper, execution prefers the newest fresh approved champion for the frozen strategy version and requires its persisted constitution hash to match the deployed control policy. A rejected challenger cannot displace a still-fresh champion merely because it ran later; Railway regenerates research automatically after a policy-changing deployment.
 
 ## Execution and emergency behavior
 
@@ -130,11 +131,14 @@ The system does not automatically arm paper capital. Once a stage is authorized,
 - Every broker POST stores its client order ID before transmission. If the acknowledgement is lost, VolForge queries Alpaca by that ID and suppresses all duplicate submissions until the ambiguity resolves.
 - Alpaca REST reconciliation is authoritative even when the trade stream misses an event.
 - Partial fills, cancel-pending states, retries, expiration, rejection, mismatch, and reconciliation errors have explicit states.
+- Multi-quantity exits keep an order-by-order fill ledger; realized P&L uses the weighted broker credit and a structure cannot close in the journal until recorded fills agree with broker flatness.
+- Broker rejection degrades reconciliation and starts a per-underlying cooldown, preventing a broken route from being resubmitted every cycle.
+- An incomplete reservation created by a crash before broker transmission self-cancels after the acknowledgement-recovery window.
 - Option-chain pagination must complete or the scan fails closed.
 - Indicative-feed decisions carry feed provenance and conservative friction. OPRA is preferred when available.
 - Issuer and macro news are paginated and independently classified. An unavailable news feed vetoes new entries.
 - Turning off new entries never disables exits.
-- Emergency mode blocks entries, cancels working orders, closes tracked spreads, cleans up orphan option legs, reconciles flatness, and only then suspends the broker.
+- Emergency mode blocks entries, cancels risk-increasing working orders, preserves identifiable working closes, and ladders tracked spread exits. After three unsuccessful spread attempts by default, it escalates to short-leg-first single-leg closes, suppresses duplicates, reconciles broker flatness, and only then suspends the broker. The fixed competition cutoff has the same autonomous last-resort behavior after four atomic attempts, without suspending the account.
 
 ## Verification
 
@@ -161,7 +165,7 @@ The final submission must use a brand-new Alpaca paper account starting at exact
 
 The API preflight cannot independently prove when Alpaca created the account. Final eligibility remains Alpaca and judge authority.
 
-After attestation, run **VolForge autonomous options agent** once. Its pinned Alpaca CLI records an independent paper-account, market-clock, and CLI-version oracle in Supabase. Paper promotion and entry require that proof to be fresh and matched to the connected account.
+After attestation, run **VolForge autonomous options agent** once. Its pinned Alpaca CLI records an independent paper-account, market-clock, and CLI-version proof in Supabase. Paper authorization and entry require that proof to be healthy, paper-mode, and matched to the connected account; current account, clock, permissions, and buying power are queried from Alpaca REST every cycle.
 
 ## Submission assets
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { constantTimeEqual } from "../lib/auth";
 import { brokerMlegCreditLimit, economicMlegCredit } from "../lib/execution-ledger";
@@ -25,8 +25,13 @@ test("hard kill liquidates before broker suspension", () => {
   assert.match(agent, /authorization_cancel_requested/);
 });
 
-test("workflows serialize capital and pin Alpaca CLI", () => {
-  const workflow = readFileSync(new URL("../.github/workflows/volforge-agent.yml", import.meta.url), "utf8");
+test("workflows serialize capital and pin Alpaca CLI", (context) => {
+  const workflowUrl = new URL("../.github/workflows/volforge-agent.yml", import.meta.url);
+  if (!existsSync(workflowUrl)) {
+    context.skip("Workflow YAML is intentionally distributed separately from the normal-files ZIP.");
+    return;
+  }
+  const workflow = readFileSync(workflowUrl, "utf8");
   assert.match(workflow, /group: volforge-capital-loop/);
   assert.match(workflow, /alpaca@v0\.0\.13/);
   assert.match(workflow, /npm run cli:record/);
@@ -41,7 +46,12 @@ test("stream reconciliation and emergency recovery preserve single-writer contro
   const controlPlane = readFileSync(new URL("../worker/control-plane.ts", import.meta.url), "utf8");
   assert.match(stream, /acquireLease\("volforge-capital-loop"/);
   assert.match(stream, /deferred_to_rest_loop/);
-  assert.match(emergency, /cancelAllOrders/);
+  assert.match(stream, /service: "alpaca-trade-stream"/);
+  assert.doesNotMatch(stream, /service: "execution-control-plane"/);
+  assert.match(emergency, /isRiskReducingOptionOrder/);
+  assert.match(emergency, /pending_cancel/);
+  assert.match(emergency, /alpaca\.cancelOrder/);
+  assert.doesNotMatch(emergency, /alpaca\.cancelAllOrders/);
   const agent = readFileSync(new URL("../lib/agent.ts", import.meta.url), "utf8");
   assert.match(agent, /renewLease/);
   assert.doesNotMatch(agent, /managePositions\(\{ emergency:/);
@@ -57,13 +67,40 @@ test("manual scans use the durable Railway command queue", () => {
   assert.match(worker, /requeueControlRequest/);
 });
 
+test("Railway offsets strategy scans from reconciliation and retries lease contention", () => {
+  const worker = readFileSync(new URL("../worker/control-plane.ts", import.meta.url), "utf8");
+  assert.match(worker, /strategyInitialDelayMs = 15_000/);
+  assert.match(worker, /scheduleStrategy\(completed \? strategyIntervalMs : strategyRetryMs\)/);
+  assert.match(worker, /if \(executionBusy \|\| strategyBusy\) return/);
+  assert.doesNotMatch(worker, /void strategyCycle\(\)/);
+});
+
+test("Railway refreshes research off-hours and self-heals unusable open-session state", () => {
+  const worker = readFileSync(new URL("../worker/control-plane.ts", import.meta.url), "utf8");
+  assert.match(worker, /researchWatchdogCycle/);
+  assert.match(worker, /clock\.is_open && usable/);
+  assert.match(worker, /RESEARCH_MAX_AGE_MS/);
+  assert.match(worker, /runAutonomousResearch\("railway_research_watchdog"\)/);
+});
+
 test("dashboard surfaces the latest scheduled cycle even when no contract qualified", () => {
   const database = readFileSync(new URL("../lib/supabase.ts", import.meta.url), "utf8");
   assert.match(database, /source=in\.\(scheduled,manual\)/);
   assert.doesNotMatch(database, /latestMarketDecision:[^\n]+option_symbol=not\.is\.null/);
 });
 
-test("paper authorization requires account attestation and a fresh CLI oracle", () => {
+test("capital stages preserve an approved champion and constrain AI veto jurisdiction", () => {
+  const agent = readFileSync(new URL("../lib/agent.ts", import.meta.url), "utf8");
+  const settings = readFileSync(new URL("../app/api/settings/route.ts", import.meta.url), "utf8");
+  const dashboard = readFileSync(new URL("../lib/dashboard.ts", import.meta.url), "utf8");
+  assert.match(agent, /selectResearchRun\(researchRuns/);
+  assert.match(agent, /name: "AI critic hard veto", passed: !criticResult\.hardVeto/);
+  assert.doesNotMatch(agent, /name: "AI critic", passed: criticResult\.approve/);
+  assert.match(settings, /selectResearchRun\(await journal\.research\(\), true\)/);
+  assert.match(dashboard, /activeResearchTraceId/);
+});
+
+test("paper authorization requires account attestation and an account-bound CLI proof", () => {
   const agent = readFileSync(new URL("../lib/agent.ts", import.meta.url), "utf8");
   const settings = readFileSync(new URL("../app/api/settings/route.ts", import.meta.url), "utf8");
   for (const source of [agent, settings]) {
@@ -75,6 +112,7 @@ test("paper authorization requires account attestation and a fresh CLI oracle", 
 test("multi-leg exits translate positive economic credits to Alpaca negative limits", () => {
   assert.equal(brokerMlegCreditLimit(1.237), -1.24);
   assert.equal(economicMlegCredit("-1.24"), 1.24);
+  assert.equal(economicMlegCredit("0.20"), -0.2);
   assert.equal(economicMlegCredit(null, 0.85), 0.85);
   assert.throws(() => brokerMlegCreditLimit(0));
   const manager = readFileSync(new URL("../lib/position-manager.ts", import.meta.url), "utf8");
@@ -96,6 +134,12 @@ test("ambiguous order acknowledgements recover idempotently by client order ID",
   assert.match(manager, /pending_exit_client_order_id/);
   assert.match(reconciler, /entry_ack_recovered/);
   assert.match(reconciler, /exit_ack_recovered/);
+});
+
+test("unhealthy broker reconciliation is a hard capital gate", () => {
+  const agent = readFileSync(new URL("../lib/agent.ts", import.meta.url), "utf8");
+  assert.match(agent, /name: "Execution reconciliation"/);
+  assert.match(agent, /passed: reconciliation\.healthy/);
 });
 
 test("operators can always disarm or downgrade without stale promotion proofs", () => {

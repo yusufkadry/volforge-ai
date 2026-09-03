@@ -14,7 +14,7 @@
 
 - [x] Alpaca Trading API
 - [x] Alpaca Market Data API
-- [x] Alpaca CLI pinned and enforced as a fresh entry oracle
+- [x] Alpaca CLI pinned and enforced as an account-bound paper-mode proof
 - [x] Autonomous GitHub and Railway scheduling
 - [x] Atomic options `mleg` orders
 - [x] Defined-risk call and put verticals
@@ -50,8 +50,9 @@
 - [ ] Supabase v4 migration applied
 - [ ] Railway heartbeat healthy
 - [ ] Competition attestation matches connected account
-- [ ] CLI oracle is fresh, healthy, paper, and account-matched
+- [ ] CLI proof is healthy, paper-mode, and account-matched
 - [ ] Dashboard Run Agent queue completes through Railway
+- [ ] Thursday timing variables are exact: `COMPETITION_EXIT_AT=2026-09-03T19:30:00Z`, `COMPETITION_ENTRY_BUFFER_MINUTES=90`
 - [ ] No orphan broker positions
 - [ ] No working orders after Thursday cutoff
 - [ ] All competition positions closed and reconciled

@@ -63,17 +63,20 @@ export function candidatesWithoutActiveExposure(candidates: Candidate[], activeU
   return candidates.filter((candidate) => !blocked.has(candidate.underlying));
 }
 
-export function executionLegEligible(contract: Candidate, requireDirectionalDelta: boolean) {
+export function executionLegFailure(contract: Candidate, requireDirectionalDelta: boolean) {
   const delta = Math.abs(contract.delta ?? 0);
   const quoteAge = contract.quoteTimestamp ? Date.now() - new Date(contract.quoteTimestamp).getTime() : Number.POSITIVE_INFINITY;
-  return contract.bid > 0
-    && contract.ask > contract.bid
-    && quoteSpread(contract) <= numberEnv("MAX_QUOTE_SPREAD_PCT", 0.05)
-    && (contract.openInterest ?? 0) >= numberEnv("MIN_OPEN_INTEREST", 500)
-    && contract.tradable
-    && quoteAge >= 0
-    && quoteAge <= numberEnv("MAX_DATA_AGE_MS", 120_000)
-    && (!requireDirectionalDelta || (delta >= numberEnv("MIN_DELTA", 0.3) && delta <= numberEnv("MAX_DELTA", 0.65)));
+  if (contract.bid <= 0 || contract.ask <= contract.bid) return "invalid quote";
+  if (quoteAge < 0 || quoteAge > numberEnv("MAX_DATA_AGE_MS", 120_000)) return "stale quote";
+  if (quoteSpread(contract) > numberEnv("MAX_QUOTE_SPREAD_PCT", 0.05)) return "quote spread";
+  if ((contract.openInterest ?? 0) < numberEnv("MIN_OPEN_INTEREST", 500)) return "open interest";
+  if (!contract.tradable) return "not tradable";
+  if (requireDirectionalDelta && (delta < numberEnv("MIN_DELTA", 0.3) || delta > numberEnv("MAX_DELTA", 0.65))) return "delta target";
+  return null;
+}
+
+export function executionLegEligible(contract: Candidate, requireDirectionalDelta: boolean) {
+  return executionLegFailure(contract, requireDirectionalDelta) === null;
 }
 
 export function alphaSignal(candidate: Candidate, valuationForecast: ReturnType<typeof forecastForDte>, holdingForecast: ReturnType<typeof forecastForTradingDays>): AlphaSignal | null {
@@ -151,7 +154,8 @@ export function analyzeTradePlans(candidates: Candidate[], forecasts: Map<string
     const forecast = forecasts.get(candidate.underlying);
     if (!forecast) { reject(funnel, "missing forecast"); continue; }
     funnel.forecastsMatched += 1;
-    if (!executionLegEligible(candidate, true)) { reject(funnel, "long-leg liquidity"); continue; }
+    const executionFailure = executionLegFailure(candidate, true);
+    if (executionFailure) { reject(funnel, executionFailure); continue; }
     funnel.executableLongLegs += 1;
     const valuationForecast = forecastForDte(forecast, candidate.dte);
     const holdingForecast = forecastForTradingDays(forecast, numberEnv("EXPECTED_HOLDING_DAYS", 3));

@@ -1,7 +1,18 @@
 import { env, numberEnv } from "@/lib/env";
 
-const paperBase = () => env("ALPACA_PAPER_BASE_URL", "https://paper-api.alpaca.markets").replace(/\/v2\/?$/, "");
-const dataBase = () => env("ALPACA_DATA_BASE_URL", "https://data.alpaca.markets").replace(/\/$/, "");
+function trustedBase(configured: string, hostname: string, allowedPaths: string[]) {
+  let url: URL;
+  try { url = new URL(configured); }
+  catch { throw new Error(`Refusing malformed Alpaca endpoint for ${hostname}.`); }
+  const path = url.pathname.replace(/\/$/, "") || "/";
+  if (url.protocol !== "https:" || url.hostname !== hostname || url.port || !allowedPaths.includes(path) || url.username || url.password || url.search || url.hash) {
+    throw new Error(`Refusing untrusted Alpaca endpoint for ${hostname}.`);
+  }
+  return url.origin;
+}
+
+const paperBase = () => trustedBase(env("ALPACA_PAPER_BASE_URL", "https://paper-api.alpaca.markets"), "paper-api.alpaca.markets", ["/", "/v2"]);
+const dataBase = () => trustedBase(env("ALPACA_DATA_BASE_URL", "https://data.alpaca.markets"), "data.alpaca.markets", ["/"]);
 
 export class AlpacaRequestError extends Error {
   constructor(public readonly status: number, public readonly responseBody: string) {
@@ -17,7 +28,7 @@ async function request<T>(base: string, path: string, init: RequestInit = {}): P
   headers.set("accept", "application/json");
   if (init.body) headers.set("content-type", "application/json");
   const timeout = numberEnv("ALPACA_REQUEST_TIMEOUT_MS", 30_000);
-  const response = await fetch(`${base}${path}`, { ...init, headers, cache: "no-store", signal: init.signal ?? AbortSignal.timeout(timeout) });
+  const response = await fetch(`${base}${path}`, { ...init, headers, cache: "no-store", redirect: "error", signal: init.signal ?? AbortSignal.timeout(timeout) });
   const text = await response.text();
   if (!response.ok) throw new AlpacaRequestError(response.status, text || response.statusText);
   return (text ? JSON.parse(text) : null) as T;

@@ -9,13 +9,18 @@ import type { AgentSettings, RiskGate } from "@/lib/types";
 function number(value: unknown) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : 0; }
 function finite(value: unknown) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : null; }
 
-function nyMinutes(now = new Date()) {
+export function nyMinutes(now = new Date()) {
   const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(now);
   const value = (type: string) => Number(parts.find((part) => part.type === type)?.value ?? 0);
   return value("hour") * 60 + value("minute");
 }
 
-export async function governPortfolio(plan: TradePlan, equity: number, marketOpen: boolean, stage: AgentSettings["promotion_stage"] = "paper") {
+export function regularEntryWindow(marketOpen: boolean, now = new Date()) {
+  const minutes = nyMinutes(now);
+  return marketOpen && minutes >= 9 * 60 + 35 && minutes < 15 * 60 + 30;
+}
+
+export async function governPortfolio(plan: TradePlan, equity: number, marketOpen: boolean, stage: AgentSettings["promotion_stage"] = "paper", now = new Date()) {
   const [positions, intents, shadowPositions] = await Promise.all([alpaca.positions(), journal.activeIntents(), journal.activeShadowPositions()]);
   const activeShadows = stage === "shadow" ? shadowPositions : [];
   const optionPositions = positions.filter((position) => String(position.asset_class) === "us_option");
@@ -68,12 +73,12 @@ export async function governPortfolio(plan: TradePlan, equity: number, marketOpe
   const currentRisk = intents.reduce((total, intent) => total + number(intent.max_loss), 0) + activeShadows.reduce((total, position) => total + number(position.max_loss), 0);
   const proposedRisk = currentRisk + plan.maxLoss * plan.quantity;
   const maxPortfolioRisk = equity * numberEnv("MAX_PORTFOLIO_RISK_PCT", 0.015);
-  const sessionMinutes = nyMinutes();
-  const inEntryWindow = marketOpen && sessionMinutes >= 9 * 60 + 35 && sessionMinutes < 15 * 60 + 30;
+  const sessionMinutes = nyMinutes(now);
+  const inEntryWindow = regularEntryWindow(marketOpen, now);
   const duplicateUnderlying = intents.some((intent) => intent.underlying === plan.candidate.underlying) || activeShadows.some((position) => position.underlying === plan.candidate.underlying);
   const gates: RiskGate[] = [
     { name: "Entry session window", passed: inEntryWindow, detail: inEntryWindow ? "After opening auction and before closing-liquidity window" : "Entry blocked during closed, opening, or late session window" },
-    { name: "Competition entry window", passed: competitionEntryAllowed(), detail: competitionEntryAllowed() ? "Enough time remains before forced competition liquidation" : "Competition liquidation buffer has begun" },
+    { name: "Competition entry window", passed: competitionEntryAllowed(now), detail: competitionEntryAllowed(now) ? "Enough time remains before forced competition liquidation" : "Competition liquidation buffer has begun" },
     { name: "Portfolio risk budget", passed: proposedRisk <= maxPortfolioRisk, detail: `$${proposedRisk.toFixed(0)} defined loss / $${maxPortfolioRisk.toFixed(0)} portfolio ceiling` },
     { name: "Underlying concentration", passed: !duplicateUnderlying, detail: duplicateUnderlying ? `${plan.candidate.underlying} already has active VolForge exposure` : "No active VolForge exposure on this underlying" },
     { name: "Portfolio Greeks provenance", passed: portfolioGreeksComplete && candidateGreeksComplete, detail: portfolioGreeksComplete && candidateGreeksComplete ? `Every existing and proposed option leg has fresh broker Greeks; oldest quote ${Math.round(oldestQuoteAgeMs / 1000)}s` : "Missing or stale broker Greeks prevent portfolio exposure estimation" },

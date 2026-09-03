@@ -8,7 +8,8 @@ export const CONSTITUTION = {
   validation: { protocol: "purged-walk-forward", minimumOosFolds: 8, requireVolatilityBaselineWin: true, requireBrierBaselineWin: true },
   portfolio: { maxPositions: 3, maxDailyLoss: 1000, maxPremiumRiskPct: 0.005, fractionalKellyCap: 0.25 },
   trading: { minDte: 21, maxDte: 35, maxHoldingDays: 7, takeProfitPct: 0.5, stopLossPct: 0.35 },
-  governance: { liveStrategyFrozen: true, challengerCanTrade: false, requireShadowEvidence: true, llmCanApprove: false, exitsRemainActiveWhenEntriesDisabled: true, eventVetoRequiresRelevantEvidence: true },
+  execution: { paperOriginsPinned: true, brokerFlatnessRequiredForClosure: true, quantityWeightedExitLedger: true, brokerFailureCooldownMinutes: 30, durableClientOrderRecovery: true, emergencyLegDecompositionAfterAttempts: 3, competitionLegDecompositionAfterAttempts: 4 },
+  governance: { liveStrategyFrozen: true, rejectedChallengerCannotDisplaceFreshChampion: true, requirePerSymbolHorizonValidation: true, requireShadowEvidenceByDefault: true, allowAuditedCompetitionBootstrap: true, llmCanApprove: false, exitsRemainActiveWhenEntriesDisabled: true, eventVetoRequiresRelevantEvidence: true },
 };
 
 export function traceId() { return randomUUID(); }

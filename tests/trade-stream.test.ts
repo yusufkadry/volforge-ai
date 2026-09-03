@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { encode } from "@msgpack/msgpack";
-import { decodeTradeStreamMessages } from "../worker/trade-stream";
+import { decodeTradeStreamMessages, isPaperTradeStreamEndpoint } from "../worker/trade-stream";
+
+test("trade updates are pinned to Alpaca's paper WebSocket origin", () => {
+  assert.equal(isPaperTradeStreamEndpoint("wss://paper-api.alpaca.markets/stream"), true);
+  assert.equal(isPaperTradeStreamEndpoint("wss://paper-api.alpaca.markets/stream/"), true);
+  assert.equal(isPaperTradeStreamEndpoint("wss://api.alpaca.markets/stream"), false);
+  assert.equal(isPaperTradeStreamEndpoint("wss://paper-api.alpaca.markets.example.com/stream"), false);
+  assert.equal(isPaperTradeStreamEndpoint("wss://user:secret@paper-api.alpaca.markets/stream"), false);
+  assert.equal(isPaperTradeStreamEndpoint("wss://paper-api.alpaca.markets/stream?token=unsafe"), false);
+  assert.equal(isPaperTradeStreamEndpoint("wss://paper-api.alpaca.markets/stream#unsafe"), false);
+});
 
 test("trade stream decodes Alpaca JSON carried in a binary WebSocket frame", () => {
   const message = { stream: "authorization", data: { status: "authorized" } };

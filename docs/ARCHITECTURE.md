@@ -17,6 +17,7 @@ flowchart LR
   K -->|Shadow| V[Shadow digital twin]
   V --> P{Promotion evidence}
   P -->|Passed| I[Execution intent]
+  U[Audited operator Paper bootstrap] --> I
   C1[Alpaca CLI oracle] --> K
   I --> O[Alpaca atomic MLeg order]
   O --> W[Trade stream and REST reconciler]
@@ -49,7 +50,7 @@ sequenceDiagram
   participant AI as Red Team
 
   Scheduler->>DB: Acquire capital lease
-  Scheduler->>DB: Verify account attestation and fresh CLI oracle
+  Scheduler->>DB: Verify account attestation and account-bound CLI proof
   Scheduler->>Alpaca: Reconcile orders and positions
   Scheduler->>Alpaca: Fetch complete paginated chain and spot
   Scheduler->>DB: Load fresh model manifests
@@ -71,13 +72,14 @@ sequenceDiagram
 ## Failure invariants
 
 1. No complete chain, no candidate.
-2. No fresh validated model, no entry.
+2. No fresh validated model with a matching frozen constitution hash, no entry.
 3. No database lease, no capital decision.
 4. No healthy execution heartbeat, no paper entry.
-5. No matching fresh-account attestation and CLI oracle, no paper entry.
+5. No matching eligible account attestation and account-bound paper CLI proof, no paper entry.
 6. No positive adverse-stress EV, no allocation.
-7. No closed shadow evidence, no paper promotion.
+7. Paper requires either eligible closed Shadow evidence or an explicit audited competition bootstrap; neither path bypasses a trade gate.
 8. Entry disablement never disables position management.
 9. Emergency suspension occurs only after broker flatness.
 10. Every nonterminal order is reconciled from REST.
 11. No model or LLM can exceed the defined-loss constitution.
+12. No intent may close in the audit ledger until broker flatness and the quantity-weighted exit-fill ledger agree.

@@ -17,7 +17,7 @@ export function conveneCourt(candidate: Candidate, forecast: ResearchForecast | 
     },
     {
       agent: "Regime",
-      vote: plan && plan.forecastEdge >= numberEnv("MIN_FORECAST_EDGE", 0.02) ? "approve" : "reject",
+      vote: plan ? "approve" : "reject",
       rationale: plan ? `${plan.holdingHorizonDays}-day direction and ${plan.valuationHorizonDays}-day volatility distributions passed purged baselines; ${plan.alphaRationale}.` : `No validated dual-alpha structure survived for ${candidate.dte} calendar DTE.`,
     },
     {

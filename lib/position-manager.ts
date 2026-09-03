@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import { alpaca } from "@/lib/alpaca";
 import { competitionExitRequired } from "@/lib/competition";
 import { CONSTITUTION } from "@/lib/constitution";
@@ -38,10 +39,10 @@ export async function submitSpreadExit(intent: ExecutionIntent, quantity: number
   const pendingMetadata = { ...(intent.metadata ?? {}), pending_exit_client_order_id: clientOrderId, exit_submission_started_at: exitRequestedAt, exit_requested_at: intent.metadata?.exit_requested_at ?? exitRequestedAt, exit_arrival_quote: intent.metadata?.exit_arrival_quote ?? quotes, exit_limit_credit: limitPrice, broker_limit_price: brokerLimitPrice, last_exit_quote: quotes };
   await journal.updateIntent(intent.id, { status: "exit_pending", exit_order_id: null, exit_reason: reason, current_debit: quotes.closeNatural, exit_attempts: attempt, metadata: pendingMetadata });
   const submission = await submitOrderRecoverably({
-    order_class: "mleg", qty: quantity, type: "limit", time_in_force: "day", limit_price: brokerLimitPrice.toFixed(2), client_order_id: clientOrderId,
+    order_class: "mleg", qty: String(quantity), type: "limit", time_in_force: "day", limit_price: brokerLimitPrice.toFixed(2), client_order_id: clientOrderId,
     legs: [
-      { symbol: intent.long_leg, ratio_qty: 1, side: "sell", position_intent: "sell_to_close" },
-      { symbol: intent.short_leg, ratio_qty: 1, side: "buy", position_intent: "buy_to_close" },
+      { symbol: intent.long_leg, ratio_qty: "1", side: "sell", position_intent: "sell_to_close" },
+      { symbol: intent.short_leg, ratio_qty: "1", side: "buy", position_intent: "buy_to_close" },
     ],
   }, clientOrderId);
   const order = submission.order;
@@ -56,7 +57,7 @@ export async function submitSpreadExit(intent: ExecutionIntent, quantity: number
   return event;
 }
 
-async function closeOrphanLeg(position: Record<string, unknown>) {
+async function closeSingleLeg(position: Record<string, unknown>) {
   const quantity = Math.abs(number(position.qty));
   const side = number(position.qty) > 0 ? "sell" : "buy";
   const positionIntent = number(position.qty) > 0 ? "sell_to_close" : "buy_to_close";
@@ -66,14 +67,30 @@ async function closeOrphanLeg(position: Record<string, unknown>) {
   const quote = (snapshot.latestQuote ?? snapshot.latest_quote ?? {}) as Record<string, unknown>;
   const limit = side === "sell" ? number(quote.bp ?? quote.bid_price) : number(quote.ap ?? quote.ask_price);
   if (!symbol || quantity <= 0 || limit <= 0) throw new Error(`Cannot price orphan option leg ${symbol || "unknown"}.`);
-  return alpaca.submitOrder({ symbol, qty: quantity, side, type: "limit", time_in_force: "day", limit_price: limit.toFixed(2), position_intent: positionIntent, client_order_id: `vf-orphan-${Date.now().toString(36)}`.slice(0, 48), extended_hours: false });
+  const clientOrderId = `vf-orphan-${randomUUID()}`.slice(0, 48);
+  await journal.writeOrderEvent({ client_order_id: clientOrderId, event_key: `${clientOrderId}:orphan_close_pending`, event_type: "orphan_close_pending", payload: { symbol, quantity, side, position_intent: positionIntent, limit_price: limit } });
+  const submission = await submitOrderRecoverably({ symbol, qty: String(quantity), side, type: "limit", time_in_force: "day", limit_price: limit.toFixed(2), position_intent: positionIntent, client_order_id: clientOrderId, extended_hours: false }, clientOrderId);
+  return submission.order;
 }
 
 export async function managePositions(options: { emergency?: boolean } = {}) {
-  const [positions, intents] = await Promise.all([alpaca.positions(), journal.activeIntents()]);
+  const competitionLiquidation = competitionExitRequired();
+  const forcedLiquidation = Boolean(options.emergency || competitionLiquidation);
+  const [positions, intents, workingOrders] = await Promise.all([
+    alpaca.positions(),
+    journal.activeIntents(),
+    forcedLiquidation ? alpaca.orders("open", 500) : Promise.resolve([]),
+  ]);
   const optionPositions = positions.filter((position) => String(position.asset_class) === "us_option");
   const bySymbol = new Map(optionPositions.map((position) => [String(position.symbol), position]));
   const trackedSymbols = new Set(intents.flatMap((intent) => [intent.long_leg, intent.short_leg]));
+  const workingOrderIds = new Set(workingOrders.map((order) => String(order.id ?? "")).filter(Boolean));
+  const symbolsWithWorkingCloses = new Set(workingOrders.flatMap((order) => {
+    const directIntent = String(order.position_intent ?? "").toLowerCase();
+    const symbols = directIntent.endsWith("_to_close") && order.symbol ? [String(order.symbol)] : [];
+    const legs = Array.isArray(order.legs) ? order.legs as Array<Record<string, unknown>> : [];
+    return [...symbols, ...legs.filter((leg) => String(leg.position_intent ?? "").toLowerCase().endsWith("_to_close")).map((leg) => String(leg.symbol ?? "")).filter(Boolean)];
+  }));
   const actions: Array<Record<string, unknown>> = [];
 
   for (const intent of intents) {
@@ -81,11 +98,58 @@ export async function managePositions(options: { emergency?: boolean } = {}) {
     const long = bySymbol.get(intent.long_leg);
     const short = bySymbol.get(intent.short_leg);
     if (!long && !short) continue;
-    if (!long || !short || number(long.qty) <= 0 || number(short.qty) >= 0) {
+    if (!long || !short || number(long.qty) <= 0 || number(short.qty) >= 0 || Math.abs(number(long.qty)) !== Math.abs(number(short.qty))) {
       await journal.updateIntent(intent.id, { status: "reconciliation_error", last_error: "Broker legs do not match the reserved vertical." });
       const event = { trace_id: intent.trace_id, alpaca_order_id: intent.entry_order_id ?? "", event_key: `${intent.id}:spread_leg_mismatch:${Date.now()}`, event_type: "spread_leg_mismatch", payload: { intent_id: intent.id, long_present: Boolean(long), short_present: Boolean(short), long_qty: long?.qty, short_qty: short?.qty } };
       await journal.writeOrderEvent(event);
       actions.push(event);
+      if (forcedLiquidation) {
+        // Close short exposure first, then any remaining long leg. The regular path
+        // stays fail-closed; forced liquidation may decompose a broken spread.
+        for (const position of [short, long].filter((value): value is Record<string, unknown> => Boolean(value))) {
+          if (symbolsWithWorkingCloses.has(String(position.symbol ?? ""))) {
+            actions.push({ event_type: "mismatched_leg_close_working", payload: { intent_id: intent.id, symbol: position.symbol, qty: position.qty } });
+            continue;
+          }
+          try {
+            const order = await closeSingleLeg(position);
+            const closeEvent = { trace_id: intent.trace_id, alpaca_order_id: String(order.id ?? ""), event_key: `${String(order.id ?? "")}:mismatched_leg_close_submitted`, event_type: "mismatched_leg_close_submitted", payload: { intent_id: intent.id, symbol: position.symbol, qty: position.qty } };
+            await journal.writeOrderEvent(closeEvent);
+            actions.push(closeEvent);
+          } catch (error) {
+            actions.push({ event_type: "mismatched_leg_close_error", payload: { intent_id: intent.id, symbol: position.symbol, error: error instanceof Error ? error.message : "unknown error" } });
+          }
+        }
+      }
+      continue;
+    }
+    const liquidationMode = options.emergency ? "emergency" : competitionLiquidation ? "competition" : null;
+    const maxSpreadAttempts = Math.max(1, Math.floor(numberEnv(options.emergency ? "MAX_EMERGENCY_SPREAD_EXIT_ATTEMPTS" : "MAX_COMPETITION_SPREAD_EXIT_ATTEMPTS", options.emergency ? 3 : 4)));
+    const workingSpreadClose = Boolean(intent.exit_order_id && workingOrderIds.has(intent.exit_order_id))
+      || (symbolsWithWorkingCloses.has(intent.long_leg) && symbolsWithWorkingCloses.has(intent.short_leg));
+    if (liquidationMode && workingSpreadClose) {
+      actions.push({ event_type: `${liquidationMode}_spread_close_working`, payload: { intent_id: intent.id, order_id: intent.exit_order_id } });
+      continue;
+    }
+    if (liquidationMode && (intent.exit_attempts ?? 0) >= maxSpreadAttempts) {
+      await journal.updateIntent(intent.id, { status: "reconciliation_error", exit_order_id: null, last_error: `${liquidationMode === "emergency" ? "Emergency" : "Competition-cutoff"} spread limit ladder exhausted after ${intent.exit_attempts ?? 0} attempt(s); risk-reducing single-leg closes are active.` });
+      const escalation = { trace_id: intent.trace_id, alpaca_order_id: intent.exit_order_id ?? "", event_key: `${intent.id}:${liquidationMode}_leg_escalation:${intent.exit_attempts ?? 0}`, event_type: `${liquidationMode}_leg_escalation`, payload: { intent_id: intent.id, attempts: intent.exit_attempts ?? 0, close_sequence: [intent.short_leg, intent.long_leg] } };
+      await journal.writeOrderEvent(escalation);
+      actions.push(escalation);
+      for (const position of [short, long]) {
+        if (symbolsWithWorkingCloses.has(String(position.symbol ?? ""))) {
+          actions.push({ event_type: `${liquidationMode}_leg_close_working`, payload: { intent_id: intent.id, symbol: position.symbol, qty: position.qty } });
+          continue;
+        }
+        try {
+          const order = await closeSingleLeg(position);
+          const closeEvent = { trace_id: intent.trace_id, alpaca_order_id: String(order.id ?? ""), event_key: `${String(order.id ?? "")}:${liquidationMode}_leg_close_submitted`, event_type: `${liquidationMode}_leg_close_submitted`, payload: { intent_id: intent.id, symbol: position.symbol, qty: position.qty } };
+          await journal.writeOrderEvent(closeEvent);
+          actions.push(closeEvent);
+        } catch (error) {
+          actions.push({ event_type: `${liquidationMode}_leg_close_error`, payload: { intent_id: intent.id, symbol: position.symbol, error: error instanceof Error ? error.message : "unknown error" } });
+        }
+      }
       continue;
     }
     const quantity = Math.min(Math.abs(number(long.qty)), Math.abs(number(short.qty)), intent.quantity);
@@ -99,7 +163,7 @@ export async function managePositions(options: { emergency?: boolean } = {}) {
     const dte = daysToExpiry(intent.long_leg);
     let reason: string | null = null;
     if (options.emergency) reason = "emergency_stop";
-    else if (competitionExitRequired()) reason = "competition_cutoff";
+    else if (competitionLiquidation) reason = "competition_cutoff";
     else if (returnPct >= CONSTITUTION.trading.takeProfitPct) reason = "take_profit";
     else if (returnPct <= -CONSTITUTION.trading.stopLossPct) reason = "stop_loss";
     else if (dte <= 14) reason = "dte_exit";
@@ -118,10 +182,14 @@ export async function managePositions(options: { emergency?: boolean } = {}) {
     }
   }
 
-  if (options.emergency) {
+  if (forcedLiquidation) {
     for (const position of optionPositions.filter((item) => !trackedSymbols.has(String(item.symbol)))) {
+      if (symbolsWithWorkingCloses.has(String(position.symbol ?? ""))) {
+        actions.push({ event_type: "orphan_close_working", payload: { symbol: position.symbol, qty: position.qty } });
+        continue;
+      }
       try {
-        const order = await closeOrphanLeg(position);
+        const order = await closeSingleLeg(position);
         const event = { alpaca_order_id: String(order.id ?? ""), event_key: `${String(order.id ?? "")}:orphan_close_submitted`, event_type: "orphan_close_submitted", payload: { symbol: position.symbol, qty: position.qty } };
         await journal.writeOrderEvent(event);
         actions.push(event);

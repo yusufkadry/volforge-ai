@@ -6,11 +6,13 @@ import { advanceEmergencyStop } from "@/lib/emergency";
 import { numberEnv, universe } from "@/lib/env";
 import { reconcileExecution } from "@/lib/execution-reconciler";
 import { executionKey, intentClientOrderId } from "@/lib/execution-ledger";
+import { supervisionIssues } from "@/lib/execution-health";
 import { conveneCourt } from "@/lib/model-court";
 import { AmbiguousOrderSubmissionError, submitOrderRecoverably } from "@/lib/order-submission";
+import { brokerAccountGates, cliAccountOracleGate, competitionAccountGate, executionHeartbeatGate, paperEndpointGate } from "@/lib/paper-readiness";
 import { managePositions } from "@/lib/position-manager";
 import { governPortfolio } from "@/lib/portfolio-governor";
-import { forecastsFromRun, forecastForDte, forecastForTradingDays, holdingDirection, researchForecastPassed, validationPassed } from "@/lib/research";
+import { DEFAULT_RESEARCH_MAX_AGE_MS, forecastsFromRun, forecastForDte, forecastForTradingDays, holdingDirection, researchForecastPassed, selectResearchRun, validationPassed } from "@/lib/research";
 import { analyzeTradePlans, candidatesWithoutActiveExposure, rewardPlanFailure } from "@/lib/reward-engine";
 import { createRiskSnapshot, portfolioGates } from "@/lib/risk-book";
 import { manageShadowPositions, reserveShadowPosition, shadowPromotionEvidence } from "@/lib/shadow-manager";
@@ -18,33 +20,11 @@ import { composeStructure } from "@/lib/structure-composer";
 import { journal } from "@/lib/supabase";
 import { riskGates, scanSurface, selectCandidate, thesis } from "@/lib/strategy";
 import { assessWorldIntelligence } from "@/lib/world-intelligence";
-import type { Decision, ResearchForecast, RiskGate } from "@/lib/types";
+import type { Decision, ResearchForecast, ResearchRun } from "@/lib/types";
 
-function researchTimestamp(run: Awaited<ReturnType<typeof journal.latestResearch>>) {
+function researchTimestamp(run: ResearchRun | null | undefined) {
   const generated = typeof run?.report?.generated_at === "string" ? run.report.generated_at : run?.created_at;
   return generated ? new Date(generated).getTime() : 0;
-}
-
-function heartbeatGate(stage: "research" | "shadow" | "paper", heartbeat: Awaited<ReturnType<typeof journal.latestHeartbeat>>): RiskGate {
-  if (stage !== "paper") return { name: "Execution heartbeat", passed: true, detail: "Broker worker heartbeat is required only for paper entry" };
-  const age = heartbeat?.last_seen_at ? Date.now() - new Date(heartbeat.last_seen_at).getTime() : Number.POSITIVE_INFINITY;
-  const passed = heartbeat?.status === "healthy" && age >= 0 && age <= numberEnv("MAX_WORKER_HEARTBEAT_AGE_MS", 120_000);
-  return { name: "Execution heartbeat", passed, detail: passed ? `Execution control plane healthy; heartbeat ${Math.round(age / 1000)}s old` : "Railway execution control plane is missing, stale, or degraded" };
-}
-
-function accountAttestationGate(stage: "research" | "shadow" | "paper", attestation: Awaited<ReturnType<typeof journal.latestAccountAttestation>>, account: Record<string, unknown>): RiskGate {
-  if (stage !== "paper") return { name: "Competition account attestation", passed: true, detail: "Fresh-account attestation is required only for paper entry" };
-  const accountId = String(account.id ?? account.account_number ?? "");
-  const passed = attestation?.eligible_preflight === true && String(attestation.account_id ?? "") === accountId;
-  return { name: "Competition account attestation", passed, detail: passed ? "Eligible $100,000 paper preflight matches the connected Alpaca account" : "Run the competition-account attestation on this exact fresh paper account before entry" };
-}
-
-function cliPreflightGate(stage: "research" | "shadow" | "paper", preflight: Awaited<ReturnType<typeof journal.latestCliPreflight>>, account: Record<string, unknown>): RiskGate {
-  if (stage !== "paper") return { name: "Alpaca CLI oracle", passed: true, detail: "Independent CLI evidence is required only for paper entry" };
-  const age = preflight?.created_at ? Date.now() - new Date(preflight.created_at).getTime() : Number.POSITIVE_INFINITY;
-  const accountId = String(account.id ?? account.account_number ?? "");
-  const passed = preflight?.healthy === true && preflight.paper === true && preflight.account_id === accountId && age >= 0 && age <= numberEnv("MAX_CLI_PREFLIGHT_AGE_MS", 45 * 60_000);
-  return { name: "Alpaca CLI oracle", passed, detail: passed ? `Pinned CLI paper preflight matches this account; ${Math.round(age / 60_000)} minutes old` : "Pinned Alpaca CLI preflight is missing, stale, unhealthy, or belongs to another account" };
 }
 
 function validationDetail(forecast: ResearchForecast | undefined, dte: number) {
@@ -87,9 +67,17 @@ export async function runAgent(source: "scheduled" | "manual" = "scheduled") {
 }
 
 async function runLeasedAgent(source: "scheduled" | "manual", trace_id: string, renewLease: () => Promise<boolean>) {
-  const [settings, clock, latestResearch, account, heartbeat, accountAttestation, cliPreflight] = await Promise.all([
-    journal.settings(), alpaca.clock(), journal.latestResearch(), alpaca.account(), journal.latestHeartbeat("execution-control-plane"), journal.latestAccountAttestation(), journal.latestCliPreflight(),
+  const [settings, clock, researchRuns, account, accountConfiguration, heartbeat, accountAttestation, cliPreflight] = await Promise.all([
+    journal.settings(), alpaca.clock(), journal.research(), alpaca.account(), alpaca.accountConfig(), journal.latestHeartbeat("execution-control-plane"), journal.latestAccountAttestation(), journal.latestCliPreflight(),
   ]);
+  const researchSelection = selectResearchRun(researchRuns, settings.promotion_stage === "shadow" || settings.promotion_stage === "paper");
+  const latestResearch = researchSelection.selected;
+  const researchSelectionEvidence = {
+    selected_trace_id: researchSelection.selected?.trace_id ?? null,
+    newest_trace_id: researchSelection.newest?.trace_id ?? null,
+    champion_trace_id: researchSelection.champion?.trace_id ?? null,
+    used_prior_champion: researchSelection.usedChampion,
+  };
   const entriesAllowed = settings.promotion_stage === "paper" && settings.trading_enabled && !settings.emergency_stop;
   const reconciliation = await reconcileExecution({ entriesAllowed, leaseGuard: renewLease });
   const managementLease = await renewLease();
@@ -109,14 +97,14 @@ async function runLeasedAgent(source: "scheduled" | "manual", trace_id: string, 
   }
 
   const researchAgeMs = Date.now() - researchTimestamp(latestResearch);
-  const researchFresh = Boolean(latestResearch && researchAgeMs >= 0 && researchAgeMs <= numberEnv("RESEARCH_MAX_AGE_MS", 12 * 60 * 60_000));
+  const researchFresh = Boolean(latestResearch && researchAgeMs >= 0 && researchAgeMs <= numberEnv("RESEARCH_MAX_AGE_MS", DEFAULT_RESEARCH_MAX_AGE_MS));
   const forecasts = forecastsFromRun(latestResearch);
   const researchBySymbol = new Map(forecasts.map((forecast) => [forecast.symbol, forecast]));
   if (!latestResearch || !forecasts.length) {
     const rationale = latestResearch
       ? "The latest persisted research run uses a legacy or incomplete forecast schema. Run the autonomous research factory once with this release before market evaluation."
       : "No persisted research forecast is available. The dedicated research workflow must complete before market evaluation.";
-    return write({ source, underlying: "RESEARCH", option_symbol: null, side: null, score: null, implied_volatility: null, expected_move: null, status: "ERROR", rationale, risk_gates: [{ name: "Research availability", passed: false, detail: latestResearch ? "Latest run has no valid horizon manifests" : "No versioned forecast manifest found" }], trace_id, strategy_version: STRATEGY_VERSION, raw: { constitution_hash: constitutionHash(), research_trace_id: latestResearch?.trace_id ?? null, reconciliation, position_actions: positionActions, shadow_actions: shadowActions } });
+    return write({ source, underlying: "RESEARCH", option_symbol: null, side: null, score: null, implied_volatility: null, expected_move: null, status: "ERROR", rationale, risk_gates: [{ name: "Research availability", passed: false, detail: latestResearch ? "Selected research run has no valid horizon manifests" : "No versioned forecast manifest found" }], trace_id, strategy_version: STRATEGY_VERSION, raw: { constitution_hash: constitutionHash(), research_trace_id: latestResearch?.trace_id ?? null, research_selection: researchSelectionEvidence, reconciliation, position_actions: positionActions, shadow_actions: shadowActions } });
   }
 
   const symbols = universe();
@@ -135,35 +123,51 @@ async function runLeasedAgent(source: "scheduled" | "manual", trace_id: string, 
     const leader = selectCandidate(candidates);
     return { trace_id, engine: "Surface", underlying: symbols[index], option_symbol: leader?.optionSymbol ?? null, payload: { contracts_seen: candidates.length, leader, complete: result.status === "fulfilled", scan_error: result.status === "rejected" ? String(result.reason) : null, research_trace_id: latestResearch.trace_id } };
   }));
-  const [activeIntents, activeShadows] = await Promise.all([journal.activeIntents(), journal.activeShadowPositions()]);
+  const failureCooldownMinutes = Math.max(1, numberEnv("ENTRY_FAILURE_COOLDOWN_MINUTES", 30));
+  const failureCutoff = new Date(Date.now() - failureCooldownMinutes * 60_000).toISOString();
+  const [activeIntents, activeShadows, recentFailedIntents] = await Promise.all([
+    journal.activeIntents(), journal.activeShadowPositions(), settings.promotion_stage === "paper" ? journal.recentFailedIntents(failureCutoff) : Promise.resolve([]),
+  ]);
   const activeExposure = settings.promotion_stage === "shadow" ? activeShadows : activeIntents;
-  const blockedUnderlyings = new Set(activeExposure.map((position) => position.underlying));
+  const failedUnderlyings = new Set(recentFailedIntents.map((intent) => intent.underlying));
+  const blockedUnderlyings = new Set([...activeExposure.map((position) => position.underlying), ...failedUnderlyings]);
   const allocationCandidates = candidatesWithoutActiveExposure(allCandidates, blockedUnderlyings);
   const blockedCandidateCount = allCandidates.length - allocationCandidates.length;
   const allocationAnalysis = analyzeTradePlans(allocationCandidates, researchBySymbol, Number(account.equity ?? 0), settings.max_premium_per_trade);
   const tradePlan = allocationAnalysis.plans[0];
   const candidate = tradePlan?.candidate ?? selectCandidate(allocationCandidates) ?? selectCandidate(allCandidates);
   const allocationFailure = blockedCandidateCount > 0 && !allocationCandidates.length
-    ? `${blockedCandidateCount} contracts were excluded because every qualified underlying already has active ${settings.promotion_stage} exposure.`
+    ? `${blockedCandidateCount} contracts were excluded by active ${settings.promotion_stage} exposure or a ${failureCooldownMinutes}-minute broker-failure cooldown.`
     : rewardPlanFailure(allocationCandidates, researchBySymbol, Number(account.equity ?? 0), settings.max_premium_per_trade, allocationAnalysis.diagnostics);
 
   if (!candidate) {
     const reason = scanErrors.length === symbols.length
       ? `Every option-chain scan failed closed: ${scanErrors.join(" | ")}`
       : `No complete option chain passed the model-directed scan. ${allocationFailure}`;
-    return write({ source, underlying: "MARKET", option_symbol: null, side: null, score: null, implied_volatility: null, expected_move: null, status: scanErrors.length === symbols.length ? "ERROR" : "SCANNED", rationale: reason, risk_gates: [{ name: "Research freshness", passed: researchFresh, detail: researchFresh ? `${Math.round(researchAgeMs / 60_000)} minutes old` : "Persisted research is stale" }], trace_id, strategy_version: STRATEGY_VERSION, raw: { constitution_hash: constitutionHash(), research_trace_id: latestResearch.trace_id, scan_errors: scanErrors, reconciliation, position_actions: positionActions, shadow_actions: shadowActions, allocation: { status: "unavailable", reason, funnel: allocationAnalysis.diagnostics, blocked_candidate_count: blockedCandidateCount, blocked_underlyings: [...blockedUnderlyings] } } });
+    return write({ source, underlying: "MARKET", option_symbol: null, side: null, score: null, implied_volatility: null, expected_move: null, status: scanErrors.length === symbols.length ? "ERROR" : "SCANNED", rationale: reason, risk_gates: [{ name: "Research freshness", passed: researchFresh, detail: researchFresh ? `${Math.round(researchAgeMs / 60_000)} minutes old` : "Persisted research is stale" }], trace_id, strategy_version: STRATEGY_VERSION, raw: { constitution_hash: constitutionHash(), research_trace_id: latestResearch.trace_id, research_selection: researchSelectionEvidence, scan_errors: scanErrors, reconciliation, position_actions: positionActions, shadow_actions: shadowActions, allocation: { status: "unavailable", reason, funnel: allocationAnalysis.diagnostics, blocked_candidate_count: blockedCandidateCount, blocked_underlyings: [...blockedUnderlyings], broker_failure_cooldown_underlyings: [...failedUnderlyings] } } });
   }
 
   const forecast = researchBySymbol.get(candidate.underlying);
   const optionForecast = forecast ? forecastForDte(forecast, candidate.dte) : undefined;
   const activeIntent = activeIntents.find((intent) => intent.underlying === candidate.underlying) ?? null;
   const activeShadow = activeShadows.find((position) => position.underlying === candidate.underlying) ?? null;
-  const idempotencyKey = tradePlan ? executionKey(tradePlan) : null;
+  const marketNow = clock.timestamp && Number.isFinite(new Date(clock.timestamp).getTime()) ? new Date(clock.timestamp) : new Date();
+  const idempotencyKey = tradePlan ? executionKey(tradePlan, marketNow, trace_id) : null;
   const world = await assessWorldIntelligence(candidate);
-  const governor = tradePlan ? await governPortfolio(tradePlan, Number(account.equity ?? 0), clock.is_open, settings.promotion_stage) : null;
+  const governor = tradePlan ? await governPortfolio(tradePlan, Number(account.equity ?? 0), clock.is_open, settings.promotion_stage, marketNow) : null;
   const calibration = await calibrate();
   const forecastEdge = tradePlan?.forecastEdge ?? (optionForecast?.forecastRv ?? 0) - candidate.impliedVolatility;
   const gates = riskGates(candidate, clock.is_open);
+  const managementIssues = supervisionIssues(positionActions);
+  const reconciliationFailures = reconciliation.intents.filter((item) => !["open", "filled", "closed", "new", "accepted", "pending_new", "working", "canceled", "cancel_requested", "resubmitted", "submitted", "skipped"].includes(item.state));
+  gates.push({
+    name: "Execution reconciliation",
+    passed: reconciliation.healthy,
+    detail: reconciliation.healthy
+      ? `${reconciliation.intents.length} active intent(s) reconciled; no orphan broker option legs`
+      : `${reconciliation.orphanPositions.length} orphan leg(s); unresolved states ${reconciliationFailures.map((item) => item.state).join(", ") || "broker-state mismatch"}`,
+  });
+  gates.push({ name: "Position supervision", passed: managementIssues.length === 0, detail: managementIssues.length ? `${managementIssues.length} unresolved mark, exit, or broker-persistence action(s)` : `${positionActions.length} position-management action(s); no unresolved supervision errors` });
   gates.push(...portfolioGates(riskSnapshot));
   gates.push(...(governor?.gates ?? [{ name: "Portfolio governor", passed: false, detail: "No qualifying structure available for portfolio simulation" }]));
   gates.push({ name: "Research freshness", passed: researchFresh, detail: researchFresh ? `${Math.round(researchAgeMs / 60_000)} minutes old; trace ${latestResearch.trace_id.slice(0, 8)}` : `${Math.round(researchAgeMs / 3_600_000)} hours old; refresh required` });
@@ -184,19 +188,23 @@ async function runLeasedAgent(source: "scheduled" | "manual", trace_id: string, 
   gates.push({ name: "Distributed capital lease", passed: decisionLease, detail: decisionLease ? "Exclusive renewable capital lease is held" : "Capital lease was lost; all allocation is suppressed" });
   const authorization = await liveCapitalAuthorization(settings.promotion_stage, tradePlan ? tradePlan.maxLoss * tradePlan.quantity : 0);
   gates.push({ name: "Live capital authorization", passed: authorization.passed, detail: authorization.detail });
-  gates.push(heartbeatGate(settings.promotion_stage, heartbeat));
-  gates.push(accountAttestationGate(settings.promotion_stage, accountAttestation, account));
-  gates.push(cliPreflightGate(settings.promotion_stage, cliPreflight, account));
-  gates.push({ name: "Shadow promotion evidence", passed: settings.promotion_stage !== "paper" || shadowEvidence.eligibleForPaper, detail: settings.promotion_stage === "paper" ? `${shadowEvidence.sampleSize} closed; $${shadowEvidence.pnl.toFixed(0)} P&L; ${(shadowEvidence.winRate * 100).toFixed(0)}% wins` : "Required only before paper capital" });
+  const paperOnlyGates = [
+    paperEndpointGate(),
+    executionHeartbeatGate(heartbeat),
+    competitionAccountGate(accountAttestation, account),
+    cliAccountOracleGate(cliPreflight, account),
+    ...brokerAccountGates(account, accountConfiguration, tradePlan ? tradePlan.maxLoss * tradePlan.quantity : 0),
+  ];
+  gates.push(...paperOnlyGates.map((gate) => settings.promotion_stage === "paper" ? gate : { ...gate, passed: true, detail: `${gate.name} is enforced only after explicit Paper-stage authorization` }));
   const criticResult = await critic(candidate, tradePlan, world);
-  gates.push({ name: "AI critic", passed: criticResult.approve, detail: criticResult.rationale });
+  gates.push({ name: "AI critic hard veto", passed: !criticResult.hardVeto, detail: criticResult.hardVeto ? `Hard veto: ${criticResult.rationale}` : criticResult.approve ? `Approved: ${criticResult.rationale}` : `Advisory concerns only: ${criticResult.rationale}` });
   gates.push({ name: "Capital promotion", passed: settings.promotion_stage !== "research", detail: `Current stage: ${settings.promotion_stage}` });
   gates.push({ name: "New-entry arm", passed: settings.promotion_stage === "shadow" || entriesAllowed, detail: settings.promotion_stage === "shadow" ? "Shadow allocation enabled without broker submission" : entriesAllowed ? "Paper entries armed" : "Paper entries disabled" });
-  const excluded = new Set(["Capital promotion", "New-entry arm", "Shadow promotion evidence", "Execution heartbeat"]);
+  const excluded = new Set(["Capital promotion", "New-entry arm"]);
   const researchApproved = gates.filter((gate) => !excluded.has(gate.name)).every((gate) => gate.passed);
   const approved = settings.promotion_stage === "shadow"
     ? researchApproved
-    : settings.promotion_stage === "paper" && researchApproved && entriesAllowed && shadowEvidence.eligibleForPaper && heartbeatGate(settings.promotion_stage, heartbeat).passed;
+    : settings.promotion_stage === "paper" && researchApproved && entriesAllowed;
   const court = conveneCourt(candidate, forecast, gates, tradePlan, world);
   const decision: Decision = {
     source, underlying: candidate.underlying, option_symbol: candidate.optionSymbol, side: "buy",
@@ -207,9 +215,9 @@ async function runLeasedAgent(source: "scheduled" | "manual", trace_id: string, 
     trace_id, strategy_version: STRATEGY_VERSION, model_score: optionForecast?.validation.brierSkill ?? null,
     data_freshness_ms: candidate.quoteTimestamp ? Math.max(0, Date.now() - new Date(candidate.quoteTimestamp).getTime()) : null,
     raw: {
-      constitution_hash: constitutionHash(), evidence_hash: court.evidenceHash, research_trace_id: latestResearch.trace_id,
+      constitution_hash: constitutionHash(), evidence_hash: court.evidenceHash, research_trace_id: latestResearch.trace_id, research_selection: researchSelectionEvidence,
       forecast, selected_horizon: optionForecast, court: court.opinions, world, portfolio_governor: governor, calibration, shadow_evidence: shadowEvidence,
-      execution_heartbeat: heartbeat, account_attestation: accountAttestation, cli_preflight: cliPreflight, reconciliation, risk_snapshot: riskSnapshot, position_actions: positionActions, shadow_actions: shadowActions, scan_errors: scanErrors,
+      execution_heartbeat: heartbeat, account_attestation: accountAttestation, cli_preflight: cliPreflight, account_configuration: accountConfiguration, reconciliation, risk_snapshot: riskSnapshot, position_actions: positionActions, shadow_actions: shadowActions, scan_errors: scanErrors,
       allocation: tradePlan ? {
         status: "ranked", model: tradePlan.valuation.model, alpha_source: tradePlan.alphaSource, alpha_rationale: tradePlan.alphaRationale, structure: `${candidate.contractType} debit spread`, short_leg: tradePlan.shortLeg.optionSymbol,
         initial_limit: tradePlan.debit, entry_mid: tradePlan.entryMid, natural_debit: tradePlan.naturalDebit, maximum_approved_debit: tradePlan.maxEntryDebit,
@@ -217,8 +225,8 @@ async function runLeasedAgent(source: "scheduled" | "manual", trace_id: string, 
         payoff_probability: tradePlan.payoffProbability, base_expected_value: tradePlan.baseExpectedValue, stressed_expected_value: tradePlan.stressedExpectedValue,
         expected_value: tradePlan.expectedValue, kelly_fraction: tradePlan.kellyFraction, raw_kelly_fraction: tradePlan.rawKellyFraction,
         cvar_95: tradePlan.valuation.cvar95, pnl_percentiles: { p10: tradePlan.valuation.pnlP10, p50: tradePlan.valuation.pnlP50, p90: tradePlan.valuation.pnlP90 },
-        risk_budget: tradePlan.riskBudget, quantity: tradePlan.quantity, allocation_score: tradePlan.allocationScore, idempotency_key: idempotencyKey, assumptions: tradePlan.valuation.assumptions, funnel: allocationAnalysis.diagnostics, blocked_candidate_count: blockedCandidateCount, blocked_underlyings: [...blockedUnderlyings],
-      } : { status: "rejected", reason: allocationFailure, funnel: allocationAnalysis.diagnostics, blocked_candidate_count: blockedCandidateCount, blocked_underlyings: [...blockedUnderlyings] },
+        risk_budget: tradePlan.riskBudget, quantity: tradePlan.quantity, allocation_score: tradePlan.allocationScore, idempotency_key: idempotencyKey, assumptions: tradePlan.valuation.assumptions, funnel: allocationAnalysis.diagnostics, blocked_candidate_count: blockedCandidateCount, blocked_underlyings: [...blockedUnderlyings], broker_failure_cooldown_underlyings: [...failedUnderlyings],
+      } : { status: "rejected", reason: allocationFailure, funnel: allocationAnalysis.diagnostics, blocked_candidate_count: blockedCandidateCount, blocked_underlyings: [...blockedUnderlyings], broker_failure_cooldown_underlyings: [...failedUnderlyings] },
     },
   };
 
@@ -256,7 +264,7 @@ async function runLeasedAgent(source: "scheduled" | "manual", trace_id: string, 
   try {
     if (!tradePlan) return write(decision);
     const reservation = await journal.reserveIntent({
-      trace_id, strategy_version: STRATEGY_VERSION, idempotency_key: idempotencyKey ?? executionKey(tradePlan), stage: "paper", status: "entry_pending",
+      trace_id, strategy_version: STRATEGY_VERSION, idempotency_key: idempotencyKey ?? executionKey(tradePlan, marketNow, trace_id), stage: "paper", status: "entry_pending",
       underlying: candidate.underlying, contract_type: candidate.contractType, long_leg: candidate.optionSymbol, short_leg: tradePlan.shortLeg.optionSymbol, quantity: tradePlan.quantity, filled_quantity: 0,
       entry_debit: tradePlan.debit, entry_limit_price: tradePlan.debit, max_entry_debit: tradePlan.maxEntryDebit,
       max_loss: tradePlan.maxLoss * tradePlan.quantity, max_reward: tradePlan.maxReward * tradePlan.quantity, entry_attempts: 1, exit_attempts: 0,

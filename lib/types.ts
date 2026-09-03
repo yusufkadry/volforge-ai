@@ -281,6 +281,7 @@ export type DashboardSnapshot = {
   latestResearchDecision: Decision | null;
   settings: AgentSettings;
   research: ResearchRun[];
+  activeResearchTraceId: string | null;
   shadowPositions: ShadowPosition[];
   riskSnapshot: Record<string, unknown> | null;
   intents: ExecutionIntent[];

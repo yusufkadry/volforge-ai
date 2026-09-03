@@ -5,7 +5,7 @@ import { orderEventKey } from "../lib/execution-ledger";
 import { reconcileExecution } from "../lib/execution-reconciler";
 import { journal } from "../lib/supabase";
 
-const endpoint = process.env.ALPACA_TRADE_STREAM_URL ?? "wss://paper-api.alpaca.markets/stream";
+const endpoint = process.env.ALPACA_TRADE_STREAM_URL?.trim() || "wss://paper-api.alpaca.markets/stream";
 
 type TradeStreamMessage = { stream?: string; data?: Record<string, unknown> };
 
@@ -28,7 +28,24 @@ export function decodeTradeStreamMessages(raw: RawData): TradeStreamMessage[] {
   return [...decodeMulti(payload)].flatMap(normalizeMessages);
 }
 
+export function isPaperTradeStreamEndpoint(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "wss:"
+      && url.hostname === "paper-api.alpaca.markets"
+      && url.port === ""
+      && url.username === ""
+      && url.password === ""
+      && url.search === ""
+      && url.hash === ""
+      && url.pathname.replace(/\/$/, "") === "/stream";
+  } catch {
+    return false;
+  }
+}
+
 export function startTradeStream(instanceId: string = randomUUID()) {
+  if (!isPaperTradeStreamEndpoint(endpoint)) throw new Error("ALPACA_TRADE_STREAM_URL must be Alpaca's exact WSS paper trade-stream endpoint.");
   const key = process.env.ALPACA_API_KEY;
   const secret = process.env.ALPACA_SECRET_KEY;
   if (!key || !secret) throw new Error("ALPACA_API_KEY and ALPACA_SECRET_KEY are required for the trade stream worker.");
@@ -39,7 +56,7 @@ export function startTradeStream(instanceId: string = randomUUID()) {
   let lastEventAt: string | null = null;
 
   async function heartbeat(status: "healthy" | "degraded" | "stopped", details: Record<string, unknown> = {}) {
-    await journal.heartbeat({ service: "execution-control-plane", instance_id: instanceId, status, last_seen_at: new Date().toISOString(), details: { stream_authenticated: authenticated, last_event_at: lastEventAt, endpoint, reconnect_attempt: reconnectAttempt, ...details } });
+    await journal.heartbeat({ service: "alpaca-trade-stream", instance_id: instanceId, status, last_seen_at: new Date().toISOString(), details: { stream_authenticated: authenticated, last_event_at: lastEventAt, endpoint, reconnect_attempt: reconnectAttempt, ...details } });
   }
 
   function connect() {
@@ -103,7 +120,11 @@ export function startTradeStream(instanceId: string = randomUUID()) {
     });
   }
 
-  const heartbeatTimer = setInterval(() => void heartbeat(authenticated ? "healthy" : "degraded"), 30_000);
+  const heartbeatTimer = setInterval(() => {
+    void heartbeat(authenticated ? "healthy" : "degraded").catch((error) => {
+      console.error("Trade-stream heartbeat failed", error instanceof Error ? error.message : error);
+    });
+  }, 30_000);
   connect();
   return {
     instanceId,

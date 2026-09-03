@@ -7,7 +7,9 @@ import { journal } from "@/lib/supabase";
 import type { ExecutionIntent } from "@/lib/types";
 
 function number(value: unknown) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : 0; }
+function finiteNumber(value: unknown) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : null; }
 function text(value: unknown) { return typeof value === "string" ? value : ""; }
+function currency(value: number) { return Math.round(value * 100) / 100; }
 const working = new Set(["new", "accepted", "pending_new", "accepted_for_bidding", "partially_filled", "pending_cancel", "pending_replace", "calculated"]);
 const canceled = new Set(["canceled", "expired", "replaced", "done_for_day"]);
 const failed = new Set(["rejected", "stopped", "suspended"]);
@@ -26,6 +28,16 @@ function matchedQuantity(intent: ExecutionIntent, positions: Map<string, Record<
   const short = positions.get(intent.short_leg);
   if (!long || !short || number(long.qty) <= 0 || number(short.qty) >= 0) return 0;
   return Math.min(Math.abs(number(long.qty)), Math.abs(number(short.qty)));
+}
+
+function positionMismatch(intent: ExecutionIntent, positions: Map<string, Record<string, unknown>>) {
+  const long = positions.get(intent.long_leg);
+  const short = positions.get(intent.short_leg);
+  if (!long && !short) return false;
+  return !long || !short
+    || number(long.qty) <= 0
+    || number(short.qty) >= 0
+    || Math.abs(number(long.qty)) !== Math.abs(number(short.qty));
 }
 
 function elapsedMs(start: string | undefined, end: string | undefined) {
@@ -47,20 +59,49 @@ function entryMetadata(intent: ExecutionIntent, order: Record<string, unknown>, 
   };
 }
 
+function exitFillLedger(intent: ExecutionIntent, order: Record<string, unknown>, fillCredit: number) {
+  const existing = (intent.metadata?.exit_fills_by_order ?? {}) as Record<string, unknown>;
+  const fills: Record<string, { quantity: number; credit: number }> = {};
+  for (const [orderId, value] of Object.entries(existing)) {
+    const fill = value && typeof value === "object" ? value as Record<string, unknown> : {};
+    const quantity = number(fill.quantity);
+    const credit = finiteNumber(fill.credit);
+    if (orderId && quantity > 0 && credit !== null) fills[orderId] = { quantity, credit };
+  }
+  const orderId = text(order.id) || intent.exit_order_id || "";
+  const quantity = number(order.filled_qty);
+  if (orderId && quantity > 0 && Number.isFinite(fillCredit)) fills[orderId] = { quantity, credit: fillCredit };
+  const values = Object.values(fills);
+  const totalQuantity = values.reduce((total, fill) => total + fill.quantity, 0);
+  const totalCredit = values.reduce((total, fill) => total + fill.credit * fill.quantity, 0);
+  return {
+    fills,
+    totalQuantity,
+    weightedCredit: totalQuantity > 0 ? totalCredit / totalQuantity : fillCredit,
+    realizedPnl: currency(values.reduce((total, fill) => total + (fill.credit - intent.entry_debit) * 100 * fill.quantity, 0)),
+  };
+}
+
 function exitMetadata(intent: ExecutionIntent, order: Record<string, unknown>, fillCredit: number) {
   const arrival = (intent.metadata?.exit_arrival_quote ?? intent.metadata?.last_exit_quote ?? {}) as Record<string, unknown>;
   const arrivalMid = number(arrival.closeMid);
   const filledAt = text(order.filled_at) || text(order.updated_at) || new Date().toISOString();
   const entryShortfall = number(intent.metadata?.entry_implementation_shortfall);
-  const exitShortfall = arrivalMid > 0 ? (arrivalMid - fillCredit) * 100 * intent.quantity : 0;
+  const ledger = exitFillLedger(intent, order, fillCredit);
+  const exitShortfall = arrivalMid > 0
+    ? Object.values(ledger.fills).reduce((total, fill) => total + (arrivalMid - fill.credit) * 100 * fill.quantity, 0)
+    : 0;
   return {
     ...(intent.metadata ?? {}),
     closed_at: filledAt,
     exit_broker_order: order,
+    exit_fills_by_order: ledger.fills,
+    exit_filled_quantity: ledger.totalQuantity,
+    weighted_exit_credit: ledger.weightedCredit,
     exit_fill_latency_ms: elapsedMs(text(intent.metadata?.exit_requested_at), filledAt),
     exit_implementation_shortfall: arrivalMid > 0 ? exitShortfall : null,
     round_trip_implementation_shortfall: entryShortfall + exitShortfall,
-    realized_pnl: (fillCredit - intent.entry_debit) * 100 * intent.quantity,
+    realized_pnl: ledger.realizedPnl,
   };
 }
 
@@ -108,10 +149,10 @@ async function resubmitEntry(intent: ExecutionIntent) {
   let submission: Awaited<ReturnType<typeof submitOrderRecoverably>>;
   try {
     submission = await submitOrderRecoverably({
-      order_class: "mleg", qty: intent.quantity, type: "limit", time_in_force: "day", limit_price: limit.toFixed(2), client_order_id: clientOrderId,
+      order_class: "mleg", qty: String(intent.quantity), type: "limit", time_in_force: "day", limit_price: limit.toFixed(2), client_order_id: clientOrderId,
       legs: [
-        { symbol: intent.long_leg, ratio_qty: 1, side: "buy", position_intent: "buy_to_open" },
-        { symbol: intent.short_leg, ratio_qty: 1, side: "sell", position_intent: "sell_to_open" },
+        { symbol: intent.long_leg, ratio_qty: "1", side: "buy", position_intent: "buy_to_open" },
+        { symbol: intent.short_leg, ratio_qty: "1", side: "sell", position_intent: "sell_to_open" },
       ],
     }, clientOrderId);
   } catch (error) {
@@ -137,6 +178,10 @@ async function resubmitEntry(intent: ExecutionIntent) {
 async function reconcileEntry(intent: ExecutionIntent, positions: Map<string, Record<string, unknown>>, entriesAllowed: boolean) {
   if (!intent.id) return "skipped";
   const brokerQuantity = matchedQuantity(intent, positions);
+  if (intent.status === "open" && brokerQuantity === 0) {
+    await journal.updateIntent(intent.id, { status: "reconciliation_error", last_error: "Tracked open spread is absent from Alpaca broker positions.", last_reconciled_at: new Date().toISOString() });
+    return "unverified_flatness";
+  }
   let orderId = intent.entry_order_id ?? "";
   let order: Record<string, unknown> | null = null;
   if (!orderId) {
@@ -164,6 +209,15 @@ async function reconcileEntry(intent: ExecutionIntent, positions: Map<string, Re
       await journal.updateIntent(intent.id, { status: "canceled", exit_reason: intent.exit_reason ?? "entries_disabled", last_reconciled_at: new Date().toISOString() });
       return "canceled_without_order";
     }
+    if (recovered.state === "none") {
+      const reservationTime = new Date(intent.updated_at ?? intent.created_at ?? 0).getTime();
+      const reservationAge = Number.isFinite(reservationTime) ? Math.max(0, Date.now() - reservationTime) : Number.POSITIVE_INFINITY;
+      const recoveryWindow = numberEnv("ORDER_ACK_RECONCILIATION_SECONDS", 90) * 1000;
+      if (reservationAge >= recoveryWindow) {
+        await journal.updateIntent(intent.id, { status: "canceled", exit_reason: "incomplete_reservation_recovered", last_error: "Reserved entry had no broker order ID or durable client order ID; it was canceled without broker submission.", last_reconciled_at: new Date().toISOString() });
+        return "incomplete_reservation_canceled";
+      }
+    }
     return "pending_without_order";
   }
   if (!order) {
@@ -174,10 +228,19 @@ async function reconcileEntry(intent: ExecutionIntent, positions: Map<string, Re
     }
   }
   const status = text(order.status);
-  const filledQuantity = Math.max(number(order.filled_qty), brokerQuantity);
+  const reportedFilledQuantity = number(order.filled_qty);
+  const filledQuantity = Math.max(reportedFilledQuantity, brokerQuantity);
   const fillPrice = number(order.filled_avg_price) || intent.entry_debit;
-  if (status === "filled" || (filledQuantity >= intent.quantity && brokerQuantity > 0)) {
-    const quantity = filledQuantity || intent.quantity;
+  if (reportedFilledQuantity > 0 && brokerQuantity <= 0) {
+    await journal.updateIntent(intent.id, { status: "reconciliation_error", last_error: "Alpaca reports an entry fill, but the matching broker option legs are not present.", last_reconciled_at: new Date().toISOString() });
+    return "unverified_flatness";
+  }
+  if (reportedFilledQuantity > 0 && brokerQuantity !== reportedFilledQuantity) {
+    await journal.updateIntent(intent.id, { status: "reconciliation_error", last_error: `Alpaca reports ${reportedFilledQuantity} filled spread(s), but broker positions confirm ${brokerQuantity}.`, last_reconciled_at: new Date().toISOString() });
+    return "position_mismatch";
+  }
+  if ((status === "filled" || filledQuantity >= intent.quantity) && brokerQuantity > 0) {
+    const quantity = brokerQuantity;
     await journal.updateIntent(intent.id, { status: "open", quantity, filled_quantity: quantity, entry_debit: fillPrice, current_debit: fillPrice, last_reconciled_at: new Date().toISOString(), last_error: null, metadata: entryMetadata(intent, order, fillPrice, quantity) });
     return "open";
   }
@@ -194,8 +257,8 @@ async function reconcileEntry(intent: ExecutionIntent, positions: Map<string, Re
     return status || "working";
   }
   if (canceled.has(status)) {
-    if (filledQuantity > 0 || brokerQuantity > 0) {
-      const quantity = filledQuantity || brokerQuantity;
+    if (brokerQuantity > 0) {
+      const quantity = brokerQuantity;
       await journal.updateIntent(intent.id, { status: "open", quantity, filled_quantity: quantity, entry_debit: fillPrice, current_debit: fillPrice, last_reconciled_at: new Date().toISOString(), metadata: entryMetadata(intent, order, fillPrice, quantity) });
       return "partial_open";
     }
@@ -260,11 +323,25 @@ async function reconcileExit(intent: ExecutionIntent, positions: Map<string, Rec
   const filledQuantity = number(order.filled_qty);
   const remaining = matchedQuantity(intent, positions);
   const fillPrice = economicMlegCredit(order.filled_avg_price, intent.current_debit ?? 0);
-  if (status === "filled" || (remaining === 0 && filledQuantity > 0)) {
-    await journal.updateIntent(intent.id, { status: "closed", current_debit: fillPrice, exit_credit: fillPrice, filled_quantity: intent.quantity, last_reconciled_at: new Date().toISOString(), last_error: null, metadata: exitMetadata(intent, order, fillPrice) });
+  if ((status === "filled" || remaining === 0) && remaining === 0 && filledQuantity > 0) {
+    const metadata = exitMetadata(intent, order, fillPrice);
+    const recordedExitQuantity = number(metadata.exit_filled_quantity);
+    if (recordedExitQuantity !== intent.quantity) {
+      await journal.updateIntent(intent.id, { status: "reconciliation_error", last_error: `Broker exposure is flat, but the durable exit ledger records ${recordedExitQuantity}/${intent.quantity} spread fill(s).`, last_reconciled_at: new Date().toISOString(), metadata });
+      return "exit_fill_mismatch";
+    }
+    const weightedCredit = number(metadata.weighted_exit_credit) || fillPrice;
+    await journal.updateIntent(intent.id, { status: "closed", current_debit: weightedCredit, exit_credit: weightedCredit, filled_quantity: intent.quantity, last_reconciled_at: new Date().toISOString(), last_error: null, metadata });
     return "closed";
   }
-  if (status === "partially_filled") await journal.updateIntent(intent.id, { status: "exit_partial", filled_quantity: Math.max(0, intent.quantity - remaining), last_reconciled_at: new Date().toISOString() });
+  if (status === "filled" && remaining > 0) {
+    await journal.updateIntent(intent.id, { status: "reconciliation_error", last_error: `Alpaca reports the exit filled, but ${remaining} matched spread(s) remain in broker positions.`, last_reconciled_at: new Date().toISOString() });
+    return "position_mismatch";
+  }
+  if (status === "partially_filled") {
+    const ledger = exitFillLedger(intent, order, fillPrice);
+    await journal.updateIntent(intent.id, { status: "exit_partial", filled_quantity: Math.max(0, intent.quantity - remaining), last_reconciled_at: new Date().toISOString(), metadata: { ...(intent.metadata ?? {}), exit_fills_by_order: ledger.fills, exit_filled_quantity: ledger.totalQuantity } });
+  }
   if (working.has(status)) {
     if (orderAgeMs(order) >= numberEnv("EXIT_ORDER_TIMEOUT_SECONDS", 60) * 1000 && status !== "pending_cancel") {
       await alpaca.cancelOrder(orderId);
@@ -276,14 +353,22 @@ async function reconcileExit(intent: ExecutionIntent, positions: Map<string, Rec
   }
   if (canceled.has(status)) {
     if (remaining <= 0 && filledQuantity > 0) {
-      await journal.updateIntent(intent.id, { status: "closed", current_debit: fillPrice, exit_credit: fillPrice, last_reconciled_at: new Date().toISOString(), metadata: exitMetadata(intent, order, fillPrice) });
+      const metadata = exitMetadata(intent, order, fillPrice);
+      const recordedExitQuantity = number(metadata.exit_filled_quantity);
+      if (recordedExitQuantity !== intent.quantity) {
+        await journal.updateIntent(intent.id, { status: "reconciliation_error", last_error: `Broker exposure is flat after a canceled exit, but the durable exit ledger records ${recordedExitQuantity}/${intent.quantity} spread fill(s).`, last_reconciled_at: new Date().toISOString(), metadata });
+        return "exit_fill_mismatch";
+      }
+      const weightedCredit = number(metadata.weighted_exit_credit) || fillPrice;
+      await journal.updateIntent(intent.id, { status: "closed", current_debit: weightedCredit, exit_credit: weightedCredit, last_reconciled_at: new Date().toISOString(), metadata });
       return "closed_after_partial_fill";
     }
     if (remaining <= 0) {
       await journal.updateIntent(intent.id, { status: "reconciliation_error", last_error: "Broker position disappeared without a verifiable exit fill.", last_reconciled_at: new Date().toISOString() });
       return "unverified_flatness";
     }
-    await journal.updateIntent(intent.id, { status: "open", last_reconciled_at: new Date().toISOString(), last_error: null });
+    const ledger = exitFillLedger(intent, order, fillPrice);
+    await journal.updateIntent(intent.id, { status: "open", last_reconciled_at: new Date().toISOString(), last_error: null, metadata: { ...(intent.metadata ?? {}), exit_fills_by_order: ledger.fills, exit_filled_quantity: ledger.totalQuantity } });
     return "reopened";
   }
   if (failed.has(status)) {
@@ -303,6 +388,11 @@ export async function reconcileExecution(options: { entriesAllowed: boolean; lea
       results.push({ intentId: intent.id, state: "lease_lost" });
       break;
     }
+    if (positionMismatch(intent, positions)) {
+      if (intent.id) await journal.updateIntent(intent.id, { status: "reconciliation_error", last_error: "Alpaca option legs are missing, sign-inverted, or quantity-mismatched.", last_reconciled_at: new Date().toISOString() });
+      results.push({ intentId: intent.id, state: "position_mismatch" });
+      continue;
+    }
     const exitState = ["exit_pending", "exit_submitted", "exit_partial", "exit_cancel_pending"].includes(intent.status)
       || (intent.status === "reconciliation_error" && Boolean(intent.exit_order_id || text(intent.metadata?.pending_exit_client_order_id)));
     const state = exitState ? await reconcileExit(intent, positions) : await reconcileEntry(intent, positions, options.entriesAllowed);
@@ -310,5 +400,10 @@ export async function reconcileExecution(options: { entriesAllowed: boolean; lea
   }
   const tracked = new Set(intents.flatMap((intent) => [intent.long_leg, intent.short_leg]));
   const orphanPositions = [...positions.keys()].filter((symbol) => !tracked.has(symbol));
-  return { reconciledAt: new Date().toISOString(), intents: results, orphanPositions, healthy: !results.some((result) => ["lookup_error", "unknown", "unverified_flatness", "lease_lost", "resubmission_error"].includes(result.state)) };
+  const unresolvedStates = new Set([
+    "entry_ack_pending", "exit_ack_pending", "resubmission_ack_pending", "pending_without_order",
+    "lookup_error", "unknown", "unverified_flatness", "position_mismatch", "lease_lost", "resubmission_error", "reconciliation_error",
+    "rejected", "stopped", "suspended", "exit_fill_mismatch",
+  ]);
+  return { reconciledAt: new Date().toISOString(), intents: results, orphanPositions, healthy: orphanPositions.length === 0 && !results.some((result) => unresolvedStates.has(result.state)) };
 }

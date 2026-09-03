@@ -46,7 +46,7 @@ Rank liquid, defined-risk Alpaca paper option verticals over a short competition
 - Base and adverse distributions include explicit quote friction and fat tails.
 - Event Intelligence vetoes unmodeled jump catalysts.
 - Probabilities shrink toward 50% when Brier skill is weak.
-- Shadow evidence is required before paper promotion.
+- Shadow evidence is the default promotion path. A compressed competition bootstrap is allowed only through an explicit audited operator authorization and does not bypass any order-level gate.
 - Defined loss and account-level circuit breakers dominate model output.
 - The LLM has veto-only authority.
 
